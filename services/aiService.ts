@@ -9,6 +9,14 @@ import { ItineraryData, Competitor, SavedCompetitor, AnalysisRecord, ChatMessage
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
+// Debug: Log API key status on load
+if (OPENAI_API_KEY) {
+    console.log('🔑 OpenAI API Key loaded:', OPENAI_API_KEY.substring(0, 7) + '...' + OPENAI_API_KEY.substring(OPENAI_API_KEY.length - 4));
+} else {
+    console.error('❌ OpenAI API Key is NOT SET! Embeddings will fail.');
+    console.error('   Add OPENAI_API_KEY=sk-your-key to your .env file');
+}
+
 // Models
 const CHAT_MODEL = 'gpt-4o';  // Main model for complex tasks
 const FAST_MODEL = 'gpt-4o-mini';  // Faster model for simpler tasks
@@ -55,32 +63,94 @@ async function chatCompletion(
 }
 
 /**
- * Generate embeddings using OpenAI
+ * Fetch with timeout wrapper
  */
-async function getEmbedding(text: string): Promise<number[]> {
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number = 30000): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    
+    try {
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        return response;
+    } catch (error) {
+        clearTimeout(timeoutId);
+        if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error(`Request timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+    }
+}
+
+/**
+ * Generate embeddings using OpenAI with timeout and retry
+ */
+async function getEmbedding(text: string, retries: number = 2): Promise<number[]> {
     if (!OPENAI_API_KEY) {
-        throw new Error('API key is missing for embeddings.');
+        console.error('❌ OPENAI_API_KEY is missing! Check your .env file.');
+        throw new Error('API key is missing for embeddings. Please set OPENAI_API_KEY in .env');
     }
 
-    const response = await fetch(`${OPENAI_BASE_URL}/embeddings`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-            model: EMBEDDING_MODEL,
-            input: text.substring(0, 8000) // Limit input length
-        })
-    });
-
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.error?.message || `Embedding API error: ${response.status}`);
+    const cleanText = text.substring(0, 8000).trim();
+    if (!cleanText) {
+        console.warn('⚠️ Empty text provided for embedding');
+        return [];
     }
 
-    const data = await response.json();
-    return data.data[0].embedding;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            console.log(`🔄 Embedding attempt ${attempt}/${retries}...`);
+            
+            const response = await fetchWithTimeout(`${OPENAI_BASE_URL}/embeddings`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: EMBEDDING_MODEL,
+                    input: cleanText
+                })
+            }, 30000); // 30 second timeout
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                const errorMsg = error.error?.message || `Embedding API error: ${response.status}`;
+                console.error(`❌ Embedding failed: ${errorMsg}`);
+                
+                // Rate limit - wait and retry
+                if (response.status === 429) {
+                    const waitTime = Math.min(1000 * Math.pow(2, attempt), 10000);
+                    console.log(`⏳ Rate limited, waiting ${waitTime}ms...`);
+                    await new Promise(r => setTimeout(r, waitTime));
+                    continue;
+                }
+                
+                throw new Error(errorMsg);
+            }
+
+            const data = await response.json();
+            console.log(`✅ Embedding generated successfully`);
+            return data.data[0].embedding;
+            
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+            console.error(`❌ Embedding attempt ${attempt} failed: ${errorMsg}`);
+            
+            if (attempt < retries) {
+                const waitTime = 1000 * attempt;
+                console.log(`⏳ Retrying in ${waitTime}ms...`);
+                await new Promise(r => setTimeout(r, waitTime));
+            } else {
+                throw error;
+            }
+        }
+    }
+    
+    throw new Error('All embedding attempts failed');
 }
 
 /**
@@ -138,9 +208,13 @@ Respond ONLY with valid JSON. The response should be in ${language}.`;
 };
 
 /**
- * Compare multiple itineraries
+ * Compare multiple itineraries with RAG-enhanced analysis
  */
-export const getComparison = async (competitors: (Competitor | SavedCompetitor)[], language: string): Promise<string> => {
+export const getComparison = async (
+    competitors: (Competitor | SavedCompetitor)[], 
+    language: string,
+    ragContext?: string // Optional RAG context for market comparison
+): Promise<string> => {
     const competitorDetails = competitors.map(c => {
         const contentSnippet = c.itineraryText.startsWith('data:image') 
             ? "[Image Content Analyzed]" 
@@ -148,16 +222,53 @@ export const getComparison = async (competitors: (Competitor | SavedCompetitor)[
         return `### ${c.name}\nContent Snippet: ${contentSnippet}\n\nANALYSIS:\n${JSON.stringify(c.analysis, null, 2)}`;
     }).join('\n\n---\n\n');
 
+    // Enhanced context from knowledge base
+    const ragSection = ragContext 
+        ? `\n## Market Reference Data\n${ragContext}\n` 
+        : '';
+
     const messages = [
         { 
             role: 'system' as const, 
-            content: `You are a travel industry analyst. Compare travel itineraries and provide detailed analysis in markdown format. Respond in ${language}.`
+            content: `You are a senior travel industry analyst with expertise in competitive analysis. 
+            
+Your analysis should be:
+- Data-driven and specific (use numbers, percentages, days)
+- Comparative (highlight relative strengths/weaknesses)  
+- Actionable (what can be improved based on comparison)
+- Market-aware (reference industry standards when available)
+
+Respond in ${language} using professional markdown format.`
         },
         { 
             role: 'user' as const, 
-            content: `Compare these travel itineraries. Create a detailed comparison table covering Duration, Destinations, Key Activities, Inclusions, Exclusions, Pricing, and Flights. End with a "### Conclusion" summarizing key differences, strengths and weaknesses.
+            content: `Perform a comprehensive comparison of these travel products:
 
-${competitorDetails}`
+${competitorDetails}
+${ragSection}
+
+Create a detailed analysis with:
+
+## 1. Product Comparison Matrix
+| Aspect | ${competitors.map(c => c.name).join(' | ')} |
+Include: Duration, Price/day, Destinations count, Included meals, Activities, Flight quality, Accommodation level
+
+## 2. Value Analysis
+Compare price-to-value ratio for each product
+
+## 3. Strengths & Weaknesses
+For each product, list top 3 strengths and areas for improvement
+
+## 4. Target Customer Profile
+Who is the ideal customer for each product?
+
+## 5. Competitive Insights
+- Which product offers best value?
+- Which has unique differentiators?
+- Market positioning recommendations
+
+### Conclusion
+Summarize key findings and strategic recommendations.`
         }
     ];
 
@@ -165,12 +276,13 @@ ${competitorDetails}`
 };
 
 /**
- * Generate strategic recommendations
+ * Generate strategic recommendations with RAG-enhanced context
  */
 export const getRecommendations = async (
     analyzedCompetitors: (Competitor | SavedCompetitor)[], 
     pastAnalyses: AnalysisRecord[],
-    language: string
+    language: string,
+    ragContext?: string // Optional RAG context from knowledge base
 ): Promise<string> => {
     const currentAnalysisSummary = analyzedCompetitors.map(c => 
         `### ${c.name}\n${JSON.stringify(c.analysis, null, 2)}`
@@ -180,21 +292,42 @@ export const getRecommendations = async (
         `- ${new Date(record.createdAt).toLocaleDateString()}: ${record.competitors.map(c => c.name).join(' vs ')}`
     ).join('\n');
 
+    // Enhanced prompt with RAG context
+    const ragSection = ragContext 
+        ? `\n## Industry Knowledge Base Context\n${ragContext}\n` 
+        : '';
+
     const messages = [
         { 
             role: 'system' as const, 
-            content: `You are a strategic travel consultant. Provide insights and recommendations based on itinerary analysis. Respond in ${language} using markdown format.`
+            content: `You are a strategic travel consultant with deep industry expertise. Provide comprehensive, actionable insights and recommendations based on itinerary analysis. 
+            
+When analyzing:
+1. Consider market positioning and competitive differentiation
+2. Identify pricing strategies and value propositions
+3. Analyze destination choices and route optimization
+4. Evaluate service inclusions vs. market standards
+5. Suggest specific improvements with business impact
+6. Reference similar products from the knowledge base when relevant
+
+Respond in ${language} using markdown format with clear sections.`
         },
         { 
             role: 'user' as const, 
-            content: `Based on this analysis, provide strategic recommendations:
+            content: `Provide strategic deep-dive recommendations for these travel products:
 
 ## Current Analysis
 ${currentAnalysisSummary}
+${ragSection}
+${pastAnalyses.length > 0 ? `## Historical Context\n${pastAnalysesSummary}` : ''}
 
-${pastAnalyses.length > 0 ? `## Past Analyses\n${pastAnalysesSummary}` : ''}
-
-Focus on competitive advantages, market trends, improvements, and unique selling propositions.`
+Please analyze:
+1. **Product Positioning** - How does each product fit in the market?
+2. **Pricing Analysis** - Is pricing competitive? Value for money?
+3. **Unique Selling Points** - What makes each product stand out?
+4. **Areas for Improvement** - Specific, actionable recommendations
+5. **Market Opportunities** - Untapped potential or gaps
+6. **Competitive Threats** - What competitors are doing better?`
         }
     ];
 
@@ -285,6 +418,17 @@ export const embedText = async (text: string): Promise<number[]> => {
 };
 
 /**
+ * Truncate text to approximate token limit (rough estimate: 4 chars = 1 token)
+ */
+function truncateToTokenLimit(text: string, maxTokens: number = 15000): string {
+    const maxChars = maxTokens * 4; // Rough approximation
+    if (text.length <= maxChars) return text;
+    
+    console.warn(`⚠️ Truncating context from ${text.length} to ${maxChars} chars (~${maxTokens} tokens)`);
+    return text.substring(0, maxChars) + '\n\n[Context truncated due to size limit...]';
+}
+
+/**
  * Generate answer for Q&A
  */
 export const generateAnswer = async (
@@ -293,10 +437,14 @@ export const generateAnswer = async (
     question: string,
     language: string
 ): Promise<string> => {
-    const historyMessages = chatHistory.slice(-10).map(m => ({
+    // Limit chat history to last 5 messages to save tokens
+    const historyMessages = chatHistory.slice(-5).map(m => ({
         role: m.role as 'user' | 'assistant',
-        content: m.content
+        content: m.content.substring(0, 2000) // Truncate long messages
     }));
+
+    // Truncate context to fit within token limits (~15k tokens for context)
+    const truncatedContext = truncateToTokenLimit(contextText, 15000);
 
     const messages = [
         { 
@@ -304,10 +452,10 @@ export const generateAnswer = async (
             content: `You are a helpful travel assistant. Answer questions based on the provided documents. If the answer is not in the documents, say so. Respond in ${language}.
 
 ## Available Documents
-${contextText}`
+${truncatedContext}`
         },
         ...historyMessages,
-        { role: 'user' as const, content: question }
+        { role: 'user' as const, content: question.substring(0, 2000) }
     ];
 
     return await chatCompletion(messages, { model: CHAT_MODEL });

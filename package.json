@@ -23,10 +23,15 @@
     "html2canvas": "^1.4.1",
     "xlsx": "^0.18.5",
     "leaflet": "^1.9.4",
-    "chromadb": "^1.9.2"
+    "chromadb": "^1.9.2",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/leaflet": "^1.9.17",
+    "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"

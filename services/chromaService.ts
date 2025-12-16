@@ -9,7 +9,14 @@ import { Document } from '../types';
 import { embedText } from './aiService';
 
 // ChromaDB configuration
-const CHROMA_URL = (typeof process !== 'undefined' && process.env?.CHROMA_URL) || 'http://localhost:8000';
+// In development, use the Vite proxy to avoid CORS issues
+// The proxy is configured at /chroma-api -> http://localhost:8000/api/v2
+const isDev = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+const CHROMA_BASE_URL = (typeof process !== 'undefined' && process.env?.CHROMA_URL) || 'http://localhost:8000';
+// Use proxy path in dev mode, direct URL in production
+const CHROMA_URL = isDev ? '' : CHROMA_BASE_URL;
+// ChromaDB v2 API
+const CHROMA_API_PATH = isDev ? '/chroma-api' : '/api/v2';
 const COLLECTION_NAME = 'itinerary_docs';
 
 // Types
@@ -37,19 +44,22 @@ export interface ChromaSearchResult {
  * ChromaDB Client for Vector Operations
  */
 class ChromaVectorStore {
-    private baseUrl: string;
+    private apiPath: string;
     private collectionId: string | null = null;
 
     constructor() {
-        this.baseUrl = CHROMA_URL;
+        // Use proxy path in development to avoid CORS issues
+        this.apiPath = CHROMA_API_PATH;
     }
 
     /**
      * Check if ChromaDB is available
+     * In v2 API, the heartbeat is at the root path (not /heartbeat)
      */
     async checkConnection(): Promise<boolean> {
         try {
-            const response = await fetch(`${this.baseUrl}/api/v1/heartbeat`);
+            // ChromaDB v2 API: heartbeat is at the root path
+            const response = await fetch(`${this.apiPath}`);
             return response.ok;
         } catch {
             return false;
@@ -64,7 +74,7 @@ class ChromaVectorStore {
 
         try {
             // Try to get existing collection
-            const getResponse = await fetch(`${this.baseUrl}/api/v1/collections/${COLLECTION_NAME}`);
+            const getResponse = await fetch(`${this.apiPath}/collections/${COLLECTION_NAME}`);
             if (getResponse.ok) {
                 const collection = await getResponse.json();
                 this.collectionId = collection.id;
@@ -72,7 +82,7 @@ class ChromaVectorStore {
             }
 
             // Create new collection
-            const createResponse = await fetch(`${this.baseUrl}/api/v1/collections`, {
+            const createResponse = await fetch(`${this.apiPath}/collections`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -105,7 +115,7 @@ class ChromaVectorStore {
         const metadatas = docs.map(d => d.metadata);
         const embeddings = docs.map(d => d.embedding).filter(e => e) as number[][];
 
-        const response = await fetch(`${this.baseUrl}/api/v1/collections/${collectionId}/add`, {
+        const response = await fetch(`${this.apiPath}/collections/${collectionId}/add`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -128,7 +138,7 @@ class ChromaVectorStore {
     async search(queryEmbedding: number[], topK: number = 5): Promise<ChromaSearchResult[]> {
         const collectionId = await this.ensureCollection();
 
-        const response = await fetch(`${this.baseUrl}/api/v1/collections/${collectionId}/query`, {
+        const response = await fetch(`${this.apiPath}/collections/${collectionId}/query`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -174,7 +184,7 @@ class ChromaVectorStore {
     async deleteDocuments(ids: string[]): Promise<void> {
         const collectionId = await this.ensureCollection();
 
-        const response = await fetch(`${this.baseUrl}/api/v1/collections/${collectionId}/delete`, {
+        const response = await fetch(`${this.apiPath}/collections/${collectionId}/delete`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ids })
@@ -192,7 +202,7 @@ class ChromaVectorStore {
         const collectionId = await this.ensureCollection();
 
         // Query to find all chunks for this document
-        const response = await fetch(`${this.baseUrl}/api/v1/collections/${collectionId}/get`, {
+        const response = await fetch(`${this.apiPath}/collections/${collectionId}/get`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -214,7 +224,7 @@ class ChromaVectorStore {
     async getStats(): Promise<{ count: number }> {
         try {
             const collectionId = await this.ensureCollection();
-            const response = await fetch(`${this.baseUrl}/api/v1/collections/${collectionId}/count`);
+            const response = await fetch(`${this.apiPath}/collections/${collectionId}/count`);
             if (response.ok) {
                 const count = await response.json();
                 return { count };
@@ -286,33 +296,85 @@ export async function indexDocumentInChroma(doc: Document): Promise<{ chunksCrea
         return { chunksCreated: 0 };
     }
 
+    // Limit document text to prevent memory issues
+    const MAX_TEXT_LENGTH = 100000; // ~100KB
+    const truncatedText = doc.text.length > MAX_TEXT_LENGTH 
+        ? doc.text.substring(0, MAX_TEXT_LENGTH)
+        : doc.text;
+
     // Chunk the document
-    const chunks = chunkText(doc.text);
+    const allChunks = chunkText(truncatedText);
     
-    // Create ChromaDB documents with embeddings
-    const chromaDocs: ChromaDocument[] = [];
+    // Limit chunks to prevent memory/API overload
+    const MAX_CHUNKS = 50;
+    const chunks = allChunks.slice(0, MAX_CHUNKS);
     
-    for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        const embedding = await embedText(chunk.text);
+    if (allChunks.length > MAX_CHUNKS) {
+        console.log(`⚠️ Document "${doc.name}" has ${allChunks.length} chunks, limiting to ${MAX_CHUNKS}`);
+    }
+    
+    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    
+    // Process chunks in small batches to avoid memory issues
+    const BATCH_SIZE = 5;
+    let totalIndexed = 0;
+    
+    for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length);
+        const batchChunks = chunks.slice(batchStart, batchEnd);
+        const chromaDocs: ChromaDocument[] = [];
         
-        chromaDocs.push({
-            id: `doc-${doc.id}-chunk-${i}`,
-            content: chunk.text,
-            metadata: {
-                documentId: doc.id,
-                documentName: doc.name,
-                chunkIndex: i,
-                source: 'knowledge_base'
-            },
-            embedding
-        });
+        for (let i = 0; i < batchChunks.length; i++) {
+            const chunkIndex = batchStart + i;
+            const chunk = batchChunks[i];
+            
+            try {
+                const embedding = await embedText(chunk.text);
+                
+                chromaDocs.push({
+                    id: `doc-${doc.id}-chunk-${chunkIndex}`,
+                    content: chunk.text,
+                    metadata: {
+                        documentId: doc.id,
+                        documentName: doc.name,
+                        chunkIndex: chunkIndex,
+                        source: 'knowledge_base'
+                    },
+                    embedding
+                });
+                
+                // Small delay between embeddings to prevent rate limiting
+                if (i < batchChunks.length - 1) {
+                    await delay(100);
+                }
+            } catch (e) {
+                console.warn(`⚠️ Failed to embed chunk ${chunkIndex}:`, e);
+                // Continue with next chunk
+            }
+        }
+        
+        // Add batch to ChromaDB
+        if (chromaDocs.length > 0) {
+            try {
+                await store.addDocuments(chromaDocs);
+                totalIndexed += chromaDocs.length;
+            } catch (e) {
+                console.warn(`⚠️ Failed to add batch to ChromaDB:`, e);
+            }
+        }
+        
+        // Log progress
+        console.log(`  ✓ Indexed ${Math.min(batchEnd, chunks.length)}/${chunks.length} chunks`);
+        
+        // Delay between batches
+        if (batchEnd < chunks.length) {
+            await delay(500);
+        }
     }
 
-    await store.addDocuments(chromaDocs);
-    console.log(`📚 ChromaDB: Indexed ${chunks.length} chunks for "${doc.name}"`);
+    console.log(`📚 ChromaDB: Indexed ${totalIndexed} chunks for "${doc.name}"`);
     
-    return { chunksCreated: chunks.length };
+    return { chunksCreated: totalIndexed };
 }
 
 /**

@@ -62,6 +62,31 @@ export interface DailyRoute {
   duration?: string;
 }
 
+export interface UploadProgress {
+  isUploading: boolean;
+  total: number;
+  completed: number;
+  current: string;
+  failed: string[];
+  succeeded: string[];
+}
+
+export interface RagProgress {
+  isActive: boolean;
+  operation: 'indexing' | 'searching' | 'generating' | 'analyzing';
+  currentStep: string;
+  progress: number; // 0-100
+  details?: {
+    documentsProcessed?: number;
+    totalDocuments?: number;
+    chunksProcessed?: number;
+    totalChunks?: number;
+    entitiesFound?: number;
+    searchResults?: number;
+  };
+  startTime?: number;
+}
+
 export interface AppState {
   competitors: Competitor[];
   comparison: string;
@@ -73,6 +98,9 @@ export interface AppState {
   analysisError: string | null;
   language: string;
   isNeo4jConnected: boolean;
+  isChromaConnected: boolean;
+  isArangoConnected: boolean;
+  uploadProgress: UploadProgress | null;
 }
 
 // Neo4j Knowledge Graph Types

@@ -1,10 +1,11 @@
 
 import React, { useReducer, useEffect, useCallback, useMemo, useState, useRef } from 'react';
-import { v4 as uuidv4 } from 'https://esm.sh/uuid';
+import { v4 as uuidv4 } from 'uuid';
 import Header from './components/Header';
 import ItineraryInput from './components/ItineraryInput';
 import AnalysisOutput from './components/AnalysisOutput';
-import { AppState, Competitor, ChatMessage, AnalysisRecord, Document, ItineraryData } from './types';
+import { AppState, Competitor, ChatMessage, AnalysisRecord, Document, ItineraryData, UploadProgress, RagProgress } from './types';
+import { RagProgressOverlay } from './components/RagProgressOverlay';
 import { parseFile } from './services/fileParser';
 import { analyzeItinerary, getComparison, getRecommendations, generateAnswer } from './services/geminiService';
 import * as dbService from './services/dbService';
@@ -20,6 +21,10 @@ import { exportToPdf, exportToExcel } from './services/exportService';
 import { DocumentTextIcon } from './components/icons/DocumentTextIcon';
 import { initializeKnowledgeGraph } from './services/neo4jService';
 import { hybridRagQuery, indexDocumentHybrid, removeDocumentHybrid, isHybridRagAvailable, getHybridRagStats } from './services/hybridRagService';
+import { isChromaAvailable, indexDocumentInChroma } from './services/chromaService';
+import { isArangoAvailable, initializeArangoRAG, indexDocumentInArango, removeDocumentFromArango, arangoHybridQuery, hybridSearch, getArangoStats } from './services/arangoService';
+import { KnowledgeBase } from './components/KnowledgeBase';
+import { processMultimodalDocument, detectFileType } from './services/multimodalRagService';
 import { DataIcon } from './components/icons/DataIcon';
 
 
@@ -47,7 +52,11 @@ type Action =
   | { type: 'ADD_DOCUMENT_SUCCESS'; payload: Document }
   | { type: 'REMOVE_DOCUMENT_SUCCESS'; payload: number }
   | { type: 'ADD_COMPETITOR_WITH_FILE'; payload: { id: string; file: File; name: string } }
-  | { type: 'SET_NEO4J_CONNECTED'; payload: boolean };
+  | { type: 'SET_NEO4J_CONNECTED'; payload: boolean }
+  | { type: 'SET_CHROMA_CONNECTED'; payload: boolean }
+  | { type: 'SET_ARANGO_CONNECTED'; payload: boolean }
+  | { type: 'SET_UPLOAD_PROGRESS'; payload: UploadProgress | null }
+  | { type: 'UPDATE_UPLOAD_PROGRESS'; payload: Partial<UploadProgress> };
 
 
 const initialState: AppState = {
@@ -61,6 +70,9 @@ const initialState: AppState = {
   analysisError: null,
   language: 'English',
   isNeo4jConnected: false,
+  isChromaConnected: false,
+  isArangoConnected: false,
+  uploadProgress: null,
 };
 
 const appReducer = (state: AppState, action: Action): AppState => {
@@ -191,9 +203,22 @@ const appReducer = (state: AppState, action: Action): AppState => {
           ]
       };
     case 'CLEAR_ALL':
-      return {...initialState, documents: state.documents, isNeo4jConnected: state.isNeo4jConnected}; // Keep knowledge base and Neo4j status on clear all
+      return {...initialState, documents: state.documents, isNeo4jConnected: state.isNeo4jConnected, isChromaConnected: state.isChromaConnected, isArangoConnected: state.isArangoConnected, uploadProgress: null}; // Keep knowledge base and connection status on clear all
     case 'SET_NEO4J_CONNECTED':
       return { ...state, isNeo4jConnected: action.payload };
+    case 'SET_CHROMA_CONNECTED':
+      return { ...state, isChromaConnected: action.payload };
+    case 'SET_ARANGO_CONNECTED':
+      return { ...state, isArangoConnected: action.payload };
+    case 'SET_UPLOAD_PROGRESS':
+      return { ...state, uploadProgress: action.payload };
+    case 'UPDATE_UPLOAD_PROGRESS':
+      return { 
+        ...state, 
+        uploadProgress: state.uploadProgress 
+          ? { ...state.uploadProgress, ...action.payload }
+          : null 
+      };
     default:
       return state;
   }
@@ -206,6 +231,15 @@ const App: React.FC = () => {
     const [isExporting, setIsExporting] = useState<false | 'pdf' | 'excel'>(false);
     const [showSavedPanel, setShowSavedPanel] = useState(false);
     const [savedPanelTab, setSavedPanelTab] = useState<'history' | 'kb'>('history');
+    const [showKnowledgeBase, setShowKnowledgeBase] = useState(false);
+    const [kbStats, setKbStats] = useState<{ documents: number; chunks: number; entities: number } | null>(null);
+    const [ragProgress, setRagProgress] = useState<RagProgress>({
+        isActive: false,
+        operation: 'searching',
+        currentStep: '',
+        progress: 0
+    });
+    const [lastRagUsage, setLastRagUsage] = useState<{ used: boolean; docCount: number }>({ used: false, docCount: 0 });
     
     // Keep a ref of the latest state for the interval-based auto-save
     const stateRef = useRef(state);
@@ -260,6 +294,35 @@ const App: React.FC = () => {
             } else {
                 console.log('⚠️ Neo4j not available - using local storage only');
             }
+            
+            // Check ChromaDB Vector Store availability (backup)
+            const chromaConnected = await isChromaAvailable();
+            dispatch({ type: 'SET_CHROMA_CONNECTED', payload: chromaConnected });
+            if (chromaConnected) {
+                console.log('✅ ChromaDB Vector Store connected (backup)');
+            } else {
+                console.log('⚠️ ChromaDB not available');
+            }
+            
+            // Check ArangoDB Hybrid RAG availability (primary)
+            const arangoConnected = await isArangoAvailable();
+            dispatch({ type: 'SET_ARANGO_CONNECTED', payload: arangoConnected });
+            if (arangoConnected) {
+                const initialized = await initializeArangoRAG();
+                if (initialized) {
+                    console.log('✅ ArangoDB Hybrid RAG connected (Graph + Vector)');
+                    // Fetch KB stats
+                    const stats = await getArangoStats();
+                    if (stats) {
+                        setKbStats(stats);
+                    }
+                } else {
+                    console.log('⚠️ ArangoDB connected but failed to initialize');
+                    dispatch({ type: 'SET_ARANGO_CONNECTED', payload: false });
+                }
+            } else {
+                console.log('⚠️ ArangoDB not available - using ChromaDB fallback');
+            }
         };
         loadData();
     }, []);
@@ -312,66 +375,370 @@ const App: React.FC = () => {
     
     const handleUploadToKB = useCallback(async (files: FileList) => {
         const filesArray = Array.from(files);
+        const totalFiles = filesArray.length;
+        
+        if (totalFiles === 0) return;
+
+        // File size limit: 10MB per file to prevent memory issues
+        const MAX_FILE_SIZE = 10 * 1024 * 1024;
+        const validFiles: File[] = [];
+        const skippedFiles: string[] = [];
+        
         for (const file of filesArray) {
+            if (file.size > MAX_FILE_SIZE) {
+                skippedFiles.push(`${file.name} (too large: ${(file.size / 1024 / 1024).toFixed(1)}MB)`);
+            } else {
+                validFiles.push(file);
+            }
+        }
+        
+        // Show RAG progress for indexing
+        setRagProgress({
+            isActive: true,
+            operation: 'indexing',
+            currentStep: 'Parsing',
+            progress: 0,
+            startTime: Date.now(),
+            details: {
+                documentsProcessed: 0,
+                totalDocuments: validFiles.length
+            }
+        });
+        
+        if (skippedFiles.length > 0) {
+            console.warn(`⚠️ Skipped ${skippedFiles.length} files exceeding 10MB limit:`, skippedFiles);
+        }
+        
+        if (validFiles.length === 0) {
+            alert('No valid files to upload. Files must be under 10MB.');
+            return;
+        }
+        
+        // Initialize progress
+        dispatch({ 
+            type: 'SET_UPLOAD_PROGRESS', 
+            payload: {
+                isUploading: true,
+                total: validFiles.length,
+                completed: 0,
+                current: validFiles[0].name,
+                failed: skippedFiles, // Include oversized files as failed
+                succeeded: []
+            }
+        });
+
+        const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+        const succeeded: string[] = [];
+        const failed: string[] = [...skippedFiles];
+        
+        // Process files ONE AT A TIME to prevent memory issues
+        for (let i = 0; i < validFiles.length; i++) {
+            const file = validFiles[i];
+            
             try {
-                const text = await parseFile(file);
-                 const newDocData: Omit<Document, 'id'> = {
+                // Update current file
+                dispatch({ 
+                    type: 'UPDATE_UPLOAD_PROGRESS', 
+                    payload: { current: file.name, completed: i }
+                });
+                
+                // Update RAG progress - Parsing step
+                const baseProgress = (i / validFiles.length) * 80;
+                setRagProgress(prev => ({
+                    ...prev,
+                    currentStep: 'Parsing',
+                    progress: baseProgress + 5,
+                    details: { 
+                        ...prev.details,
+                        documentsProcessed: i,
+                        totalDocuments: validFiles.length
+                    }
+                }));
+                
+                // Parse file - use multimodal processing for images
+                console.log(`📄 [${i + 1}/${validFiles.length}] Parsing: ${file.name}`);
+                const fileType = detectFileType(file.name);
+                let text: string;
+                
+                if (fileType === 'image') {
+                    // Use multimodal RAG for images
+                    console.log(`🖼️ Processing image with multimodal RAG: ${file.name}`);
+                    const result = await processMultimodalDocument(
+                        await parseFile(file), // This returns base64 for images
+                        file.name,
+                        'image'
+                    );
+                    text = result.text;
+                } else {
+                    text = await parseFile(file);
+                }
+                
+                // Update RAG progress - Chunking step
+                setRagProgress(prev => ({
+                    ...prev,
+                    currentStep: 'Chunking',
+                    progress: baseProgress + 20
+                }));
+                
+                // Truncate very long documents to prevent memory issues
+                const MAX_TEXT_LENGTH = 500000; // ~500KB of text
+                const truncatedText = text.length > MAX_TEXT_LENGTH 
+                    ? text.slice(0, MAX_TEXT_LENGTH) + '\n\n[Document truncated due to size...]'
+                    : text;
+                
+                const newDocData: Omit<Document, 'id'> = {
                     name: file.name,
-                    text,
+                    text: truncatedText,
                     createdAt: new Date().toISOString(),
                 };
                 
+                // Check for duplicates
+                if (state.documents.some(d => d.name === file.name)) {
+                    console.log(`⏭️ Skipping duplicate: ${file.name}`);
+                    succeeded.push(file.name);
+                    continue;
+                }
+                
                 // Save locally
-                if (!state.documents.some(d => d.name === file.name && d.text === text)) {
-                    const newId = await dbService.addDocument(newDocData);
-                    const newDoc = { ...newDocData, id: newId };
-                    dispatch({ type: 'ADD_DOCUMENT_SUCCESS', payload: newDoc });
-                    
-                    // Index for Hybrid RAG (ChromaDB + Neo4j) if connected
-                    if (state.isNeo4jConnected) {
+                const newId = await dbService.addDocument(newDocData);
+                const newDoc = { ...newDocData, id: newId };
+                dispatch({ type: 'ADD_DOCUMENT_SUCCESS', payload: newDoc });
+                
+                // Update RAG progress - Embedding step (reuse baseProgress from above)
+                setRagProgress(prev => ({
+                    ...prev,
+                    currentStep: 'Embedding',
+                    progress: baseProgress + 40
+                }));
+                
+                // Index for Hybrid RAG with retry logic
+                const indexWithRetry = async (retries = 2): Promise<void> => {
+                    for (let attempt = 1; attempt <= retries; attempt++) {
                         try {
-                            const result = await indexDocumentHybrid(newDoc);
-                            console.log(`🔍 Hybrid RAG indexed "${file.name}": Chroma=${result.chromaChunks}, Neo4j=${result.neo4jChunks}, Entities=${result.entities}`);
-                        } catch (ragError) {
-                            console.warn('Failed to index for Hybrid RAG:', ragError);
+                            // Update RAG progress - Indexing step
+                            setRagProgress(prev => ({
+                                ...prev,
+                                currentStep: 'Indexing',
+                                progress: baseProgress + 60
+                            }));
+                            
+                            if (state.isArangoConnected) {
+                                const result = await indexDocumentInArango(newDoc);
+                                
+                                // Update progress with chunk/entity counts
+                                setRagProgress(prev => ({
+                                    ...prev,
+                                    progress: baseProgress + 80,
+                                    details: {
+                                        ...prev.details,
+                                        chunksProcessed: (prev.details?.chunksProcessed || 0) + result.chunks,
+                                        entitiesFound: (prev.details?.entitiesFound || 0) + result.entities
+                                    }
+                                }));
+                                
+                                console.log(`🔗 [${i + 1}/${validFiles.length}] Indexed "${file.name}": ${result.chunks} chunks, ${result.entities} entities`);
+                                return;
+                            } else if (state.isChromaConnected) {
+                                const chromaResult = await indexDocumentInChroma(newDoc);
+                                
+                                setRagProgress(prev => ({
+                                    ...prev,
+                                    progress: baseProgress + 80,
+                                    details: {
+                                        ...prev.details,
+                                        chunksProcessed: (prev.details?.chunksProcessed || 0) + chromaResult.chunksCreated
+                                    }
+                                }));
+                                
+                                console.log(`📊 [${i + 1}/${validFiles.length}] Indexed "${file.name}": ${chromaResult.chunksCreated} chunks`);
+                                return;
+                            }
+                            return; // No indexing service available
+                        } catch (e) {
+                            if (attempt < retries) {
+                                console.warn(`⚠️ Retry ${attempt}/${retries} for "${file.name}"`);
+                                await delay(3000 * attempt); // Longer backoff
+                            } else {
+                                throw e;
+                            }
                         }
                     }
-                }
-
-            } catch(e) {
-                const error = e instanceof Error ? e.message : 'An unknown error occurred during parsing.';
-                alert(`Failed to add document "${file.name}": ${error}`);
-                // Continue to next file
+                };
+                
+                await indexWithRetry();
+                succeeded.push(file.name);
+                
+                // Update progress
+                dispatch({ 
+                    type: 'UPDATE_UPLOAD_PROGRESS', 
+                    payload: { completed: i + 1, succeeded: [...succeeded], failed: [...failed] }
+                });
+                
+                // Allow garbage collection between files
+                await delay(500);
+                
+            } catch (e) {
+                const error = e instanceof Error ? e.message : 'Unknown error';
+                console.error(`❌ Failed to process "${file.name}":`, error);
+                failed.push(file.name);
+                
+                // Update RAG progress to show error
+                setRagProgress(prev => ({
+                    ...prev,
+                    currentStep: `Failed: ${file.name}`,
+                    progress: Math.min(prev.progress + 5, 95)
+                }));
+                
+                // Update progress even on failure
+                dispatch({ 
+                    type: 'UPDATE_UPLOAD_PROGRESS', 
+                    payload: { completed: i + 1, succeeded: [...succeeded], failed: [...failed] }
+                });
+                
+                // Continue to next file after a brief pause
+                await delay(1000);
             }
         }
-    }, [state.documents, state.isNeo4jConnected]);
+        
+        // Final summary
+        console.log(`\n📊 Upload Complete: ${succeeded.length}/${validFiles.length} succeeded, ${failed.length} failed`);
+        
+        if (failed.length > 0) {
+            console.log('Failed files:', failed);
+        }
+        
+        // Mark upload as complete
+        dispatch({ 
+            type: 'UPDATE_UPLOAD_PROGRESS', 
+            payload: { isUploading: false, completed: validFiles.length }
+        });
+        
+        // Update RAG progress to complete
+        setRagProgress(prev => ({
+            ...prev,
+            currentStep: 'Complete',
+            progress: 100,
+            details: {
+                ...prev.details,
+                documentsProcessed: validFiles.length - failed.length
+            }
+        }));
+        
+        // Refresh KB stats
+        if (state.isArangoConnected) {
+            try {
+                const stats = await getArangoStats();
+                if (stats) setKbStats(stats);
+            } catch (e) {
+                console.warn('Failed to refresh KB stats:', e);
+            }
+        }
+        
+        // Hide RAG progress after a delay
+        setTimeout(() => {
+            setRagProgress(prev => ({ ...prev, isActive: false }));
+        }, 1500);
+        
+        // Keep progress visible for 5 seconds, then clear
+        setTimeout(() => {
+            dispatch({ type: 'SET_UPLOAD_PROGRESS', payload: null });
+        }, 5000);
+        
+    }, [state.documents, state.isArangoConnected, state.isChromaConnected]);
 
 
     // Orchestrate Q&A with Hybrid RAG pipeline (ChromaDB + Neo4j)
     const handleGetAnswer = async (history: ChatMessage[], question: string): Promise<string> => {
-        // 1. Try Hybrid RAG pipeline (ChromaDB for vectors + Neo4j for graph)
-        if (state.isNeo4jConnected) {
-            try {
-                const hybridResponse = await hybridRagQuery(question, history, state.language);
-                
-                console.log(`🔄 Hybrid RAG: Chroma=${hybridResponse.sources.chromaResults}, Neo4j=${hybridResponse.sources.neo4jResults}, Time=${hybridResponse.processingTime}ms`);
-                
-                if (hybridResponse.sources.chromaResults > 0 || hybridResponse.sources.neo4jResults > 0) {
-                    return hybridResponse.answer;
-                }
-            } catch (e) {
-                console.warn('Hybrid RAG query failed, falling back to local:', e);
-            }
-        }
+        const startTime = Date.now();
         
-        // 2. Fallback to local documents if Hybrid RAG not available
-        let contextText = "";
-        if (state.documents.length > 0) {
-            contextText += "## Local Documents:\n" + state.documents.map(d => `### ${d.name}\n${d.text}`).join('\n\n') + "\n\n";
-        }
+        // Show RAG progress
+        setRagProgress({
+            isActive: true,
+            operation: 'generating',
+            currentStep: 'Embedding',
+            progress: 10,
+            startTime
+        });
+        
+        try {
+            // 1. Try ArangoDB Hybrid RAG (Graph + Vector in one database)
+            if (state.isArangoConnected) {
+                try {
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 30 }));
+                    
+                    const hybridResponse = await arangoHybridQuery(question, history, state.language);
+                    
+                    setRagProgress(prev => ({ 
+                        ...prev, 
+                        currentStep: 'Generating', 
+                        progress: 70,
+                        details: {
+                            searchResults: hybridResponse.sources.vectorResults + hybridResponse.sources.graphResults,
+                            entitiesFound: hybridResponse.sources.entities.length
+                        }
+                    }));
+                    
+                    console.log(`🔗 ArangoDB Hybrid RAG: Vector=${hybridResponse.sources.vectorResults}, Graph=${hybridResponse.sources.graphResults}, Entities=${hybridResponse.sources.entities.length}, Time=${hybridResponse.processingTime}ms`);
+                    
+                    if (hybridResponse.sources.vectorResults > 0 || hybridResponse.sources.graphResults > 0) {
+                        setRagProgress(prev => ({ ...prev, currentStep: 'Formatting', progress: 100 }));
+                        setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+                        return hybridResponse.answer;
+                    }
+                } catch (e) {
+                    console.warn('ArangoDB Hybrid RAG query failed, trying fallback:', e);
+                }
+            }
+            
+            // 2. Fallback to Neo4j + ChromaDB Hybrid RAG if available
+            if (state.isNeo4jConnected) {
+                try {
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 40 }));
+                    
+                    const hybridResponse = await hybridRagQuery(question, history, state.language);
+                    
+                    setRagProgress(prev => ({ 
+                        ...prev, 
+                        currentStep: 'Generating', 
+                        progress: 70,
+                        details: {
+                            searchResults: hybridResponse.sources.chromaResults + hybridResponse.sources.neo4jResults
+                        }
+                    }));
+                    
+                    console.log(`🔄 Neo4j Hybrid RAG: Chroma=${hybridResponse.sources.chromaResults}, Neo4j=${hybridResponse.sources.neo4jResults}, Time=${hybridResponse.processingTime}ms`);
+                    
+                    if (hybridResponse.sources.chromaResults > 0 || hybridResponse.sources.neo4jResults > 0) {
+                        setRagProgress(prev => ({ ...prev, currentStep: 'Formatting', progress: 100 }));
+                        setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+                        return hybridResponse.answer;
+                    }
+                } catch (e) {
+                    console.warn('Neo4j Hybrid RAG query failed, falling back to local:', e);
+                }
+            }
+            
+            // 3. Fallback to local documents if Hybrid RAG not available
+            setRagProgress(prev => ({ ...prev, currentStep: 'Context', progress: 50 }));
+            
+            let contextText = "";
+            if (state.documents.length > 0) {
+                contextText += "## Local Documents:\n" + state.documents.map(d => `### ${d.name}\n${d.text}`).join('\n\n') + "\n\n";
+            }
 
-        // 3. Generate Answer with local context
-        return await generateAnswer(history, contextText, question, state.language);
+            setRagProgress(prev => ({ ...prev, currentStep: 'Generating', progress: 80 }));
+            
+            // 4. Generate Answer with local context
+            const answer = await generateAnswer(history, contextText, question, state.language);
+            
+            setRagProgress(prev => ({ ...prev, currentStep: 'Formatting', progress: 100 }));
+            setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+            
+            return answer;
+        } catch (error) {
+            setRagProgress(prev => ({ ...prev, isActive: false }));
+            throw error;
+        }
     };
 
     const handleAnalyze = useCallback(async () => {
@@ -408,7 +775,53 @@ const App: React.FC = () => {
             
             let comparison = 'Single itinerary loaded. Add another to compare.';
             if (uniqueAnalyzedForComparison.length > 1) {
-                comparison = await getComparison(uniqueAnalyzedForComparison, state.language);
+                // Fetch RAG context for enhanced comparison
+                let ragContext: string | undefined;
+                if (state.isArangoConnected || state.isChromaConnected) {
+                    try {
+                        // Show RAG progress
+                        setRagProgress({
+                            isActive: true,
+                            operation: 'analyzing',
+                            currentStep: 'RAG Search',
+                            progress: 10,
+                            startTime: Date.now()
+                        });
+                        
+                        // Build search query from destinations
+                        const destinations = uniqueAnalyzedForComparison
+                            .flatMap(c => c.analysis?.destinations || [])
+                            .slice(0, 5)
+                            .join(', ');
+                        
+                        if (destinations && state.isArangoConnected) {
+                            setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 30 }));
+                            
+                            const searchResults = await hybridSearch(`travel itinerary ${destinations}`);
+                            
+                            setRagProgress(prev => ({ 
+                                ...prev, 
+                                currentStep: 'Analyzing', 
+                                progress: 50,
+                                details: { searchResults: searchResults.length }
+                            }));
+                            
+                            if (searchResults.length > 0) {
+                                ragContext = searchResults
+                                    .slice(0, 3)
+                                    .map(r => `[${r.documentName}]: ${r.content}`)
+                                    .join('\n\n');
+                                console.log(`📚 RAG Context: Found ${searchResults.length} relevant documents for comparison`);
+                            }
+                        }
+                    } catch (ragError) {
+                        console.warn('RAG context fetch failed:', ragError);
+                    }
+                }
+                
+                setRagProgress(prev => ({ ...prev, currentStep: 'Comparing', progress: 70 }));
+                comparison = await getComparison(uniqueAnalyzedForComparison, state.language, ragContext);
+                setRagProgress(prev => ({ ...prev, isActive: false }));
             }
             
             dispatch({ type: 'FINISH_ALL_ANALYSES', payload: { comparison } });
@@ -417,22 +830,103 @@ const App: React.FC = () => {
             const error = e instanceof Error ? e.message : 'An unknown error occurred during analysis.';
             dispatch({ type: 'FAIL_ANALYSIS', payload: error });
         }
-    }, [state.competitors, state.language]);
+    }, [state.competitors, state.language, state.isArangoConnected, state.isChromaConnected]);
     
     const handleGenerateRecs = useCallback(async () => {
         const analyzedCompetitors = state.competitors.filter(c => c.analysis);
         if (analyzedCompetitors.length === 0) return;
         
         dispatch({ type: 'START_RECS' });
+        
+        // Show RAG progress
+        setRagProgress({
+            isActive: true,
+            operation: 'analyzing',
+            currentStep: 'RAG Search',
+            progress: 5,
+            startTime: Date.now()
+        });
+        
         try {
             const pastAnalyses = await dbService.getHistory();
-            const recommendations = await getRecommendations(analyzedCompetitors, pastAnalyses, state.language);
+            
+            // Fetch RAG context for enhanced recommendations
+            let ragContext: string | undefined;
+            if (state.isArangoConnected || state.isChromaConnected) {
+                try {
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 20 }));
+                    
+                    // Build comprehensive search query
+                    const searchTerms = analyzedCompetitors
+                        .flatMap(c => [
+                            ...(c.analysis?.destinations || []),
+                            c.analysis?.tourName || '',
+                            ...(c.analysis?.inclusions?.slice(0, 3) || [])
+                        ])
+                        .filter(Boolean)
+                        .slice(0, 8)
+                        .join(' ');
+                    
+                    if (searchTerms && state.isArangoConnected) {
+                        console.log(`🔍 RAG Search Query: "${searchTerms}"`);
+                        const searchResults = await hybridSearch(`travel insights recommendations ${searchTerms}`);
+                        
+                        console.log(`📊 RAG Search Results: ${searchResults.length} documents found`);
+                        
+                        setRagProgress(prev => ({ 
+                            ...prev, 
+                            currentStep: 'Analyzing', 
+                            progress: 40,
+                            details: { 
+                                searchResults: searchResults.length,
+                                entitiesFound: searchResults.reduce((acc, r) => acc + (r.entities?.length || 0), 0)
+                            }
+                        }));
+                        
+                        if (searchResults.length > 0) {
+                            ragContext = searchResults
+                                .slice(0, 5)
+                                .map(r => {
+                                    const entities = r.entities?.length ? ` [Entities: ${r.entities.join(', ')}]` : '';
+                                    return `[${r.documentName}${entities}]: ${r.content.substring(0, 1000)}`;
+                                })
+                                .join('\n\n---\n\n');
+                            console.log(`📚 RAG Context: Found ${searchResults.length} relevant documents for insights`);
+                            console.log(`📝 RAG Context Preview: ${ragContext.substring(0, 500)}...`);
+                            setLastRagUsage({ used: true, docCount: searchResults.length });
+                        } else {
+                            console.warn(`⚠️ No RAG results found. Make sure documents are indexed in Knowledge Base.`);
+                            setLastRagUsage({ used: false, docCount: 0 });
+                        }
+                    } else if (!searchTerms) {
+                        console.warn(`⚠️ No search terms extracted from analysis`);
+                        setLastRagUsage({ used: false, docCount: 0 });
+                    } else if (!state.isArangoConnected) {
+                        console.warn(`⚠️ ArangoDB not connected - RAG disabled`);
+                        setLastRagUsage({ used: false, docCount: 0 });
+                    }
+                } catch (ragError) {
+                    console.warn('RAG context fetch failed:', ragError);
+                }
+            }
+            
+            setRagProgress(prev => ({ ...prev, currentStep: 'Comparing', progress: 60 }));
+            
+            console.log(`🧠 Generating insights with RAG context: ${ragContext ? 'YES (' + ragContext.length + ' chars)' : 'NO (empty KB)'}`);
+            
+            const recommendations = await getRecommendations(analyzedCompetitors, pastAnalyses, state.language, ragContext);
+            
+            setRagProgress(prev => ({ ...prev, progress: 100 }));
+            setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+            
+            console.log(`✅ Insights generated successfully`);
             dispatch({ type: 'FINISH_RECS', payload: recommendations });
         } catch (e) {
+            setRagProgress(prev => ({ ...prev, isActive: false }));
             const error = e instanceof Error ? e.message : 'Failed to generate recommendations.';
             dispatch({ type: 'FAIL_RECS', payload: error });
         }
-    }, [state.competitors, state.language]);
+    }, [state.competitors, state.language, state.isArangoConnected, state.isChromaConnected]);
 
     const handleSaveToHistory = async () => {
         const analyzedCompetitors = state.competitors.filter(c => c.analysis);
@@ -477,8 +971,17 @@ const App: React.FC = () => {
             await dbService.deleteDocument(id);
             dispatch({ type: 'REMOVE_DOCUMENT_SUCCESS', payload: id });
             
-            // Remove from Hybrid RAG (ChromaDB + Neo4j)
-            if (state.isNeo4jConnected) {
+            // Remove from Hybrid RAG
+            if (state.isArangoConnected) {
+                try {
+                    await removeDocumentFromArango(id);
+                    // Refresh KB stats
+                    const stats = await getArangoStats();
+                    if (stats) setKbStats(stats);
+                } catch (e) {
+                    console.warn('Failed to remove from ArangoDB:', e);
+                }
+            } else if (state.isNeo4jConnected) {
                 try {
                     await removeDocumentHybrid(id);
                 } catch (e) {
@@ -570,14 +1073,78 @@ const App: React.FC = () => {
                                 <span>⚠️ Hybrid RAG not connected - using basic text matching</span>
                             </div>
                         )}
-                         <label htmlFor="kb-upload" className="w-full text-center block cursor-pointer px-4 py-2 rounded-lg text-sm font-semibold transition-colors bg-primary-light text-primary hover:bg-primary hover:text-white">
-                            + Add Document(s) to Knowledge Base
+                        {/* Upload Progress Indicator */}
+                        {state.uploadProgress && (
+                            <div className="w-full bg-gray-100 rounded-lg p-4 space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                    <span className="font-medium text-gray-700 truncate max-w-[200px]">
+                                        {state.uploadProgress.isUploading 
+                                            ? `📄 ${state.uploadProgress.current}`
+                                            : `✅ Upload Complete!`
+                                        }
+                                    </span>
+                                    <span className="text-gray-500 font-mono">
+                                        {state.uploadProgress.completed}/{state.uploadProgress.total}
+                                    </span>
+                                </div>
+                                <div className="w-full bg-gray-200 rounded-full h-2.5">
+                                    <div 
+                                        className={`h-2.5 rounded-full transition-all duration-300 ${
+                                            state.uploadProgress.failed.length > 0 
+                                                ? 'bg-amber-500' 
+                                                : 'bg-green-500'
+                                        }`}
+                                        style={{ 
+                                            width: `${(state.uploadProgress.completed / state.uploadProgress.total) * 100}%` 
+                                        }}
+                                    />
+                                </div>
+                                {state.uploadProgress.isUploading && (
+                                    <p className="text-xs text-gray-500 animate-pulse">
+                                        ⏳ Processing... This may take a while for large batches
+                                    </p>
+                                )}
+                                {state.uploadProgress.failed.length > 0 && (
+                                    <p className="text-xs text-red-600 truncate">
+                                        ❌ Failed ({state.uploadProgress.failed.length}): {state.uploadProgress.failed.slice(0, 3).join(', ')}{state.uploadProgress.failed.length > 3 ? '...' : ''}
+                                    </p>
+                                )}
+                                {!state.uploadProgress.isUploading && (
+                                    <p className="text-xs text-green-600">
+                                        ✓ {state.uploadProgress.succeeded.length} files indexed successfully
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                        
+                        <label 
+                            htmlFor="kb-upload" 
+                            className={`w-full text-center block cursor-pointer px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                                state.uploadProgress?.isUploading
+                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                    : 'bg-primary-light text-primary hover:bg-primary hover:text-white'
+                            }`}
+                        >
+                            {state.uploadProgress?.isUploading 
+                                ? '⏳ Processing files...'
+                                : '+ Add Document(s) to Knowledge Base'
+                            }
                         </label>
-                        <input id="kb-upload" type="file" className="hidden" accept=".pdf,.docx" onChange={(e) => e.target.files && handleUploadToKB(e.target.files)} multiple />
+                        <input 
+                            id="kb-upload" 
+                            type="file" 
+                            className="hidden" 
+                            accept=".pdf,.docx" 
+                            onChange={(e) => e.target.files && handleUploadToKB(e.target.files)} 
+                            multiple 
+                            disabled={state.uploadProgress?.isUploading}
+                        />
                         <p className="text-xs text-gray-500 text-center">
-                            {state.isNeo4jConnected 
-                                ? 'Documents indexed in ChromaDB (vectors) + Neo4j (graph)'
-                                : 'Documents stored locally in browser'
+                            {state.isArangoConnected 
+                                ? '🔗 Hybrid RAG: Graph + Vector search enabled'
+                                : state.isChromaConnected
+                                    ? '📊 Vector search enabled'
+                                    : 'Documents stored locally in browser'
                             }
                         </p>
                     </div>
@@ -588,8 +1155,28 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col text-on-surface bg-background">
+      {/* RAG Progress Overlay */}
+      <RagProgressOverlay progress={ragProgress} />
+      
       <Header />
-       <main className="flex-grow p-4 md:p-6 space-y-4 md:space-y-6">
+       <main className="flex-grow p-4 md:p-6 flex gap-4">
+        {/* Knowledge Base Sidebar */}
+        {showKnowledgeBase && (
+            <div className="w-80 flex-shrink-0 hidden md:block">
+                <KnowledgeBase
+                    documents={state.documents}
+                    isArangoConnected={state.isArangoConnected}
+                    isChromaConnected={state.isChromaConnected}
+                    uploadProgress={state.uploadProgress}
+                    onUpload={handleUploadToKB}
+                    onDelete={handleDeleteDocument}
+                    stats={kbStats}
+                />
+            </div>
+        )}
+        
+        {/* Main Content */}
+        <div className="flex-1 space-y-4 md:space-y-6 min-w-0">
         {/* Controls */}
          <div className="bg-surface p-3 rounded-xl shadow-sm border border-gray-200 flex flex-wrap items-center gap-2">
             <button onClick={handleAnalyze} disabled={!canAnalyze || state.isAnalyzing} className="flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition-colors bg-primary text-white hover:bg-primary-dark disabled:bg-gray-400 disabled:opacity-75">
@@ -618,6 +1205,27 @@ const App: React.FC = () => {
                 <span>{state.isGeneratingRecs ? 'Generating...' : 'Get Insights'}</span>
             </button>
              <button onClick={handleSaveToHistory} disabled={!isAnalyzed} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors text-on-surface-variant hover:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-transparent"><SaveIcon /><span>Save</span></button>
+             
+             {/* Knowledge Base Button */}
+             <button 
+                onClick={() => setShowKnowledgeBase(!showKnowledgeBase)} 
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                    showKnowledgeBase 
+                        ? 'bg-indigo-100 text-indigo-700' 
+                        : 'text-on-surface-variant hover:bg-gray-100'
+                }`}
+             >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                </svg>
+                <span>Knowledge Base</span>
+                {state.documents.length > 0 && (
+                    <span className="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-indigo-200 text-indigo-700">
+                        {state.documents.length}
+                    </span>
+                )}
+             </button>
+             
              <div className="relative">
                 <button onClick={() => setShowSavedPanel(true)} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors text-on-surface-variant hover:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-transparent"><ArchiveIcon /><span>Saved</span></button>
                 {showSavedPanel && (
@@ -693,8 +1301,11 @@ const App: React.FC = () => {
                 isLoadingRecs={state.isGeneratingRecs}
                 language={state.language}
                 onUploadToKB={handleUploadToKB}
-                onGetAnswer={handleGetAnswer} 
+                onGetAnswer={handleGetAnswer}
+                ragUsed={lastRagUsage.used}
+                ragDocCount={lastRagUsage.docCount}
             />
+        </div>
         </div>
       </main>
       <footer className="text-center text-sm text-on-surface-variant py-4 border-t border-gray-200 bg-surface">
@@ -705,3 +1316,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

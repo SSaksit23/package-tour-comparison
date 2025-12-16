@@ -23,6 +23,8 @@ interface AnalysisOutputProps {
   language: string;
   onUploadToKB: (files: FileList) => Promise<void>;
   onGetAnswer: (history: ChatMessage[], question: string) => Promise<string>;
+  ragUsed?: boolean;
+  ragDocCount?: number;
 }
 
 type Tab = 'data' | 'compare' | 'qna' | 'insights';
@@ -39,6 +41,8 @@ const AnalysisOutput: React.FC<AnalysisOutputProps> = ({
   language,
   onUploadToKB,
   onGetAnswer,
+  ragUsed = false,
+  ragDocCount = 0,
 }) => {
   const [activeTab, setActiveTab] = useState<Tab>('data');
   const hasContent = competitors.some(c => c.analysis);
@@ -67,7 +71,7 @@ const AnalysisOutput: React.FC<AnalysisOutputProps> = ({
   const renderContent = () => {
     switch (activeTab) {
       case 'insights':
-        return <InsightsView recommendations={recommendations} isLoading={isLoadingRecs} />;
+        return <InsightsView recommendations={recommendations} isLoading={isLoadingRecs} ragUsed={ragUsed} ragDocCount={ragDocCount} />;
       case 'data':
         return <StructuredDataView competitors={competitors} isLoading={isLoading} />;
       case 'compare':

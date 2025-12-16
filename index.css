@@ -1,0 +1,57 @@
+/* Base styles for Itinerary Analyzer */
+
+/* Reset and base */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* Font configuration: Roboto Slab for English, Sarabun for Thai */
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Roboto Slab", "Sarabun", Georgia, serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Thai text styling - applies Sarabun font to Thai unicode range */
+@font-face {
+  font-family: 'Thai-Sarabun';
+  src: local('Sarabun');
+  unicode-range: U+0E00-U+0E7F; /* Thai unicode block */
+}
+
+/* Class for explicit Thai text */
+.font-thai, [lang="th"] {
+  font-family: "Sarabun", sans-serif !important;
+}
+
+/* Auto-detect Thai text using CSS (fallback approach) */
+:where(:lang(th)),
+:where([data-lang="thai"]) {
+  font-family: "Sarabun", sans-serif;
+}
+
+/* Mixed content: Use both fonts */
+.font-mixed {
+  font-family: "Roboto Slab", "Sarabun", Georgia, serif;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Leaflet map styles */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+  z-index: 0;
+}
+
+/* Print styles */
+@media print {
+  body {
+    background: white !important;
+  }
+}
+
