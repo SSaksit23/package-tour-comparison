@@ -123,28 +123,71 @@ export const exportToExcel = async (appState: AppState): Promise<void> => {
     if (analyzedCompetitors.length > 0) {
         const competitorNames = analyzedCompetitors.map(c => c.name);
 
+        // Helper function to calculate days from duration string
+        const extractDays = (duration: string): number => {
+            const match = duration.match(/(\d+)\s*[Dd]ay/i) || duration.match(/(\d+)\s*D/);
+            return match ? parseInt(match[1]) : 0;
+        };
+
         // --- Summary Sheet (with Pricing) ---
         const summaryHeaders = ['Feature', ...competitorNames];
         const summaryBody: (string | number)[][] = [
             ['Tour Name', ...analyzedCompetitors.map(c => c.analysis!.tourName || '')],
             ['Duration', ...analyzedCompetitors.map(c => c.analysis!.duration || '')],
-            ['Destinations', ...analyzedCompetitors.map(c => (c.analysis!.destinations || []).join('\n'))]
+            ['Destinations', ...analyzedCompetitors.map(c => (c.analysis!.destinations || []).join('\n'))],
+            ['Destination Count', ...analyzedCompetitors.map(c => c.analysis!.destinations?.length || 0)]
         ];
         
+        // Add Total Price row (first pricing option)
+        summaryBody.push([
+            'Total Price',
+            ...analyzedCompetitors.map(c => {
+                const p = c.analysis!.pricing?.[0];
+                return p ? `${p.price.toLocaleString()} ${p.currency}` : 'N/A';
+            })
+        ]);
+        
+        // Add Price Per Day row
+        summaryBody.push([
+            'Price/Day',
+            ...analyzedCompetitors.map(c => {
+                const p = c.analysis!.pricing?.[0];
+                const days = extractDays(c.analysis!.duration || '');
+                if (p && days > 0) {
+                    const pricePerDay = Math.round(p.price / days);
+                    return `~${pricePerDay.toLocaleString()} ${p.currency}`;
+                }
+                return 'N/A';
+            })
+        ]);
+        
+        // Add additional pricing periods if available
         const maxPricingOptions = Math.max(0, ...analyzedCompetitors.map(c => c.analysis!.pricing?.length || 0));
-        for (let i = 0; i < maxPricingOptions; i++) {
-            summaryBody.push([
-                `Pricing Period ${i + 1}`,
-                ...analyzedCompetitors.map(c => c.analysis!.pricing?.[i]?.period || '')
-            ]);
-            summaryBody.push([
-                `Price ${i + 1}`,
-                ...analyzedCompetitors.map(c => {
-                    const p = c.analysis!.pricing?.[i];
-                    return p ? `${p.price} ${p.currency}` : '';
-                })
-            ]);
+        if (maxPricingOptions > 1) {
+            for (let i = 1; i < maxPricingOptions; i++) {
+                summaryBody.push([
+                    `Pricing Period ${i + 1}`,
+                    ...analyzedCompetitors.map(c => c.analysis!.pricing?.[i]?.period || '')
+                ]);
+                summaryBody.push([
+                    `Price ${i + 1}`,
+                    ...analyzedCompetitors.map(c => {
+                        const p = c.analysis!.pricing?.[i];
+                        return p ? `${p.price.toLocaleString()} ${p.currency}` : '';
+                    })
+                ]);
+            }
         }
+        
+        // Add meals and inclusions summary
+        summaryBody.push([
+            'Included Meals',
+            ...analyzedCompetitors.map(c => {
+                const meals = c.analysis!.dailyBreakdown?.flatMap(d => d.meals || []).filter((v, i, a) => a.indexOf(v) === i);
+                return meals?.join(', ') || 'N/A';
+            })
+        ]);
+        
         const summaryWs = XLSX.utils.aoa_to_sheet([summaryHeaders, ...summaryBody]);
         XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
 

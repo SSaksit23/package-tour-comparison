@@ -1,0 +1,31 @@
+# Core dependencies
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+PyMuPDF==1.25.1
+
+# AI Agents Framework (optional - for advanced analysis)
+# Install with: pip install crewai crewai-tools
+crewai>=0.28.0
+crewai-tools>=0.1.0
+
+# Memory for AI Agents (optional - for persistent memory)
+# Install with: pip install mem0ai
+mem0ai>=0.1.0
+
+# Web Search (optional - for real-time travel data)
+# Install with: pip install exa-py
+# Note: Requires EXA_API_KEY environment variable
+# Available versions: 1.0.0 - 1.1.0 (1.2.0 was yanked)
+exa-py>=1.0.18,<=1.1.0
+
+# LLM Providers
+openai>=1.0.0
+google-generativeai>=0.8.0
+
+# Vector Database (optional - for RAG)
+qdrant-client>=1.0.0
+
+# Agent Observability (optional)
+agentops>=0.3.0
+

@@ -7,7 +7,8 @@ import AnalysisOutput from './components/AnalysisOutput';
 import { AppState, Competitor, ChatMessage, AnalysisRecord, Document, ItineraryData, UploadProgress, RagProgress } from './types';
 import { RagProgressOverlay } from './components/RagProgressOverlay';
 import { parseFile } from './services/fileParser';
-import { analyzeItinerary, getComparison, getRecommendations, generateAnswer } from './services/geminiService';
+import { analyzeItinerary, getComparison, getRecommendations, generateAnswer, getProviderInfo } from './services/aiProvider';
+import { analyzeWithCrewAI, getAgentStatus, addMemory, getUserContext, searchWeb } from './services/agentService';
 import * as dbService from './services/dbService';
 import { AnalyzeIcon } from './components/icons/AnalyzeIcon';
 import { TrashIcon } from './components/icons/TrashIcon';
@@ -240,6 +241,36 @@ const App: React.FC = () => {
         progress: 0
     });
     const [lastRagUsage, setLastRagUsage] = useState<{ used: boolean; docCount: number }>({ used: false, docCount: 0 });
+    const [agentStatus, setAgentStatus] = useState<{ available: boolean; crew: boolean; web: boolean; memory: boolean } | null>(null);
+    const [useAgenticAnalysis, setUseAgenticAnalysis] = useState(() => {
+        // Check localStorage for user preference
+        const saved = localStorage.getItem('useAgenticAnalysis');
+        return saved !== null ? saved === 'true' : true; // Default to true
+    });
+    
+    // Save preference to localStorage
+    useEffect(() => {
+        localStorage.setItem('useAgenticAnalysis', String(useAgenticAnalysis));
+    }, [useAgenticAnalysis]);
+    
+    // Check agent status on mount
+    useEffect(() => {
+        getAgentStatus().then(status => {
+            if (status) {
+                setAgentStatus({
+                    available: status.agents_available,
+                    crew: status.travel_crew?.available || false,
+                    web: status.web_search_agent?.available || false,
+                    memory: status.memory_agent?.available || false
+                });
+                console.log('🤖 Agent Status:', {
+                    crew: status.travel_crew?.available,
+                    web: status.web_search_agent?.available,
+                    memory: status.memory_agent?.available
+                });
+            }
+        });
+    }, []);
     
     // Keep a ref of the latest state for the interval-based auto-save
     const stateRef = useRef(state);
@@ -333,19 +364,56 @@ const App: React.FC = () => {
     }, []);
 
 
+    // Helper function to auto-index document to Knowledge Base
+    const autoIndexToKB = useCallback(async (fileName: string, text: string) => {
+        // Skip if it's an image (base64) or text is too short
+        if (text.startsWith('data:image') || text.length < 100) return;
+        
+        // Check if document already exists in KB
+        const existingDocs = state.documents.filter(d => d.name === fileName);
+        if (existingDocs.length > 0) {
+            console.log(`📚 Document "${fileName}" already in KB, skipping auto-index`);
+            return;
+        }
+
+        try {
+            // Save to local DB
+            const newDoc = await dbService.addDocument({ name: fileName, text });
+            dispatch({ type: 'ADD_DOCUMENT_SUCCESS', payload: newDoc });
+            
+            // Index to ArangoDB if connected
+            if (state.isArangoConnected) {
+                console.log(`🔄 Auto-indexing "${fileName}" to Knowledge Base...`);
+                await indexDocumentInArango(newDoc);
+                console.log(`✅ Auto-indexed "${fileName}" to KB (${text.length} chars)`);
+                
+                // Refresh KB stats
+                const stats = await getArangoStats();
+                if (stats) setKbStats(stats);
+            }
+        } catch (error) {
+            console.warn(`⚠️ Auto-index failed for "${fileName}":`, error);
+            // Don't throw - this is a background operation
+        }
+    }, [state.documents, state.isArangoConnected]);
+
     const handleFileSelect = useCallback(async (targetId: string, files: File[]) => {
         if (files.length === 0) return;
 
         // 1. Handle the first file (replaces the content of the target dropzone)
         const firstFile = files[0];
-        const firstFileName = firstFile.name.substring(0, 10); // First 10 chars of filename
+        const firstFileName = firstFile.name.replace(/\.[^/.]+$/, ''); // Remove extension
         
-        dispatch({ type: 'UPDATE_COMPETITOR_NAME', payload: { id: targetId, name: firstFileName } });
+        dispatch({ type: 'UPDATE_COMPETITOR_NAME', payload: { id: targetId, name: firstFileName.substring(0, 15) } });
         dispatch({ type: 'START_PARSING', payload: { id: targetId, file: firstFile } });
         
         // Async parsing for first file
         parseFile(firstFile)
-            .then(text => dispatch({ type: 'FINISH_PARSING', payload: { id: targetId, text } }))
+            .then(async text => {
+                dispatch({ type: 'FINISH_PARSING', payload: { id: targetId, text } });
+                // Auto-index to Knowledge Base
+                await autoIndexToKB(firstFileName, text);
+            })
             .catch(e => {
                  const error = e instanceof Error ? e.message : 'An unknown error occurred during parsing.';
                  dispatch({ type: 'FAIL_PARSING', payload: { id: targetId, error } });
@@ -355,23 +423,27 @@ const App: React.FC = () => {
         for (let i = 1; i < files.length; i++) {
             const newFile = files[i];
             const newId = uuidv4();
-            const newName = newFile.name.substring(0, 10); // First 10 chars of filename
+            const newName = newFile.name.replace(/\.[^/.]+$/, ''); // Remove extension
 
             // Add new competitor slot with file attached
             dispatch({ 
                 type: 'ADD_COMPETITOR_WITH_FILE', 
-                payload: { id: newId, file: newFile, name: newName } 
+                payload: { id: newId, file: newFile, name: newName.substring(0, 15) } 
             });
 
             // Start parsing for the new file
             parseFile(newFile)
-                .then(text => dispatch({ type: 'FINISH_PARSING', payload: { id: newId, text } }))
+                .then(async text => {
+                    dispatch({ type: 'FINISH_PARSING', payload: { id: newId, text } });
+                    // Auto-index to Knowledge Base
+                    await autoIndexToKB(newName, text);
+                })
                 .catch(e => {
                      const error = e instanceof Error ? e.message : 'An unknown error occurred during parsing.';
                      dispatch({ type: 'FAIL_PARSING', payload: { id: newId, error } });
                 });
         }
-    }, []);
+    }, [autoIndexToKB]);
     
     const handleUploadToKB = useCallback(async (files: FileList) => {
         const filesArray = Array.from(files);
@@ -752,6 +824,124 @@ const App: React.FC = () => {
         dispatch({ type: 'START_ANALYSIS' });
 
         try {
+            // Try CrewAI agentic analysis if available and enabled
+            if (useAgenticAnalysis && agentStatus?.crew && competitorsWithText.length >= 1) {
+                console.log('🤖 Using CrewAI agentic analysis...');
+                
+                setRagProgress({
+                    isActive: true,
+                    operation: 'analyzing',
+                    currentStep: 'Agent Analysis',
+                    progress: 10,
+                    startTime: Date.now(),
+                    details: { agent: 'CrewAI' }
+                });
+                
+                try {
+                    // Prepare itineraries for crew analysis
+                    const itineraries = competitorsWithText.map(c => ({
+                        name: c.name,
+                        content: c.itineraryText
+                    }));
+                    
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Document Analyst', progress: 20 }));
+                    
+                    // Get user context from memory for personalization
+                    const userContext = agentStatus.memory ? await getUserContext('default') : '';
+                    
+                    // Update progress to show we're waiting for backend
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Market Researcher', progress: 30 }));
+                    
+                    // Run CrewAI analysis with timeout handling
+                    const crewResult = await analyzeWithCrewAI(itineraries, {
+                        analysis_focus: 'competitive',
+                        include_web_search: agentStatus.web,
+                        user_id: 'default'
+                    });
+                    
+                    // Update progress after call completes
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Strategic Advisor', progress: 60 }));
+                    
+                    if (crewResult.success && crewResult.analysis) {
+                        console.log('✅ CrewAI analysis completed');
+                        
+                        // Parse the agent analysis and extract structured data for each itinerary
+                        // The crew analysis contains comprehensive insights
+                        setRagProgress(prev => ({ ...prev, currentStep: 'Processing', progress: 80 }));
+                        
+                        // For each competitor, still extract basic structured data
+                        const analysisPromises = competitorsToAnalyze.map(async (c) => {
+                            try {
+                                const analysis = await analyzeItinerary(c.itineraryText, state.language);
+                                dispatch({ type: 'FINISH_INDIVIDUAL_ANALYSIS', payload: { id: c.id, analysis } });
+                                return { ...c, analysis };
+                            } catch (individualError) {
+                                const message = individualError instanceof Error ? individualError.message : String(individualError);
+                                throw new Error(`Analysis for "${c.name}" failed: ${message}`);
+                            }
+                        });
+                        
+                        const newlyAnalyzedCompetitors = await Promise.all(analysisPromises);
+                        
+                        // Use crew analysis as the comparison/insights
+                        const allAnalyzedForComparison = [
+                            ...state.competitors.filter(c => c.analysis),
+                            ...newlyAnalyzedCompetitors
+                        ];
+                        
+                        setRagProgress(prev => ({ ...prev, currentStep: 'Finalizing', progress: 95 }));
+                        
+                        // Store crew analysis as comparison (it includes comprehensive insights)
+                        dispatch({ 
+                            type: 'FINISH_ALL_ANALYSES', 
+                            payload: { comparison: crewResult.analysis } 
+                        });
+                        
+                        // Save to memory if available
+                        if (agentStatus.memory) {
+                            for (const it of itineraries) {
+                                await addMemory(
+                                    `Analyzed itinerary "${it.name}" with CrewAI agents`,
+                                    'default',
+                                    'analysis'
+                                );
+                            }
+                        }
+                        
+                        setRagProgress(prev => ({ ...prev, isActive: false }));
+                        return;
+                    } else {
+                        console.warn('⚠️ CrewAI analysis failed:', crewResult.error);
+                        setRagProgress(prev => ({ ...prev, isActive: false }));
+                        // Show error but continue with standard analysis
+                        const errorMsg = crewResult.error || 'Unknown error';
+                        if (errorMsg.includes('timed out')) {
+                            console.warn('⚠️ CrewAI timed out, falling back to standard analysis');
+                            // Don't show alert, just fall through to standard analysis
+                        } else if (errorMsg.includes('Backend service is not available')) {
+                            console.warn('⚠️ CrewAI backend not available, falling back to standard analysis');
+                            // Don't show alert, just fall through to standard analysis
+                        } else {
+                            console.warn(`⚠️ CrewAI error: ${errorMsg}, falling back to standard analysis`);
+                        }
+                        // Always fall through to standard analysis without blocking alert
+                    }
+                } catch (crewError) {
+                    console.warn('⚠️ CrewAI error, falling back to standard analysis:', crewError);
+                    setRagProgress(prev => ({ ...prev, isActive: false }));
+                    // Silently fall through to standard analysis
+                }
+            }
+            
+            // Standard analysis (fallback or if agents disabled)
+            setRagProgress({
+                isActive: true,
+                operation: 'analyzing',
+                currentStep: 'Extracting',
+                progress: 10,
+                startTime: Date.now()
+            });
+            
             // Run new analyses and dispatch updates as they complete
             const analysisPromises = competitorsToAnalyze.map(async (c) => {
                 try {
@@ -838,7 +1028,80 @@ const App: React.FC = () => {
         
         dispatch({ type: 'START_RECS' });
         
-        // Show RAG progress
+        // Try CrewAI agentic recommendations if available
+        if (useAgenticAnalysis && agentStatus?.crew) {
+            console.log('🤖 Using CrewAI for strategic recommendations...');
+            
+            setRagProgress({
+                isActive: true,
+                operation: 'analyzing',
+                currentStep: 'Agent Analysis',
+                progress: 10,
+                startTime: Date.now(),
+                details: { agent: 'CrewAI Strategic Advisor' }
+            });
+            
+            try {
+                // Prepare itineraries
+                const itineraries = analyzedCompetitors.map(c => ({
+                    name: c.name,
+                    content: c.itineraryText || ''
+                }));
+                
+                setRagProgress(prev => ({ ...prev, currentStep: 'Market Research', progress: 30 }));
+                
+                // Get user context and web search
+                const userContext = agentStatus.memory ? await getUserContext('default', 'travel preferences') : '';
+                
+                // Run CrewAI analysis focused on recommendations with timeout
+                const crewResult = await Promise.race([
+                    analyzeWithCrewAI(itineraries, {
+                        analysis_focus: 'all', // Comprehensive analysis
+                        include_web_search: agentStatus.web, // Include web search for market data
+                        user_id: 'default'
+                    }),
+                    // Timeout after 90 seconds
+                    new Promise<CrewAnalysisResponse>((resolve) => {
+                        setTimeout(() => {
+                            resolve({
+                                success: false,
+                                error: 'Analysis timed out after 90 seconds. The backend may be slow or unresponsive.'
+                            });
+                        }, 90000);
+                    })
+                ]);
+                
+                if (crewResult.success && crewResult.analysis) {
+                    console.log('✅ CrewAI recommendations generated');
+                    
+                    // Extract recommendations section from crew analysis
+                    // The crew analysis includes strategic recommendations
+                    dispatch({ type: 'FINISH_RECS', payload: crewResult.analysis });
+                    
+                    // Save to memory
+                    if (agentStatus.memory) {
+                        await addMemory(
+                            `Generated strategic recommendations for ${itineraries.length} itinerary(ies)`,
+                            'default',
+                            'analysis'
+                        );
+                    }
+                    
+                    setRagProgress(prev => ({ ...prev, isActive: false }));
+                    return;
+                } else {
+                    console.warn('⚠️ CrewAI recommendations failed:', crewResult.error);
+                    setRagProgress(prev => ({ ...prev, isActive: false }));
+                    // Don't show alert, just fall through to standard analysis
+                }
+            } catch (crewError) {
+                console.warn('⚠️ CrewAI recommendations error, falling back:', crewError);
+                setRagProgress(prev => ({ ...prev, isActive: false }));
+                // Fall through to standard recommendations
+            }
+        }
+        
+        // Standard recommendations (fallback)
         setRagProgress({
             isActive: true,
             operation: 'analyzing',
@@ -852,6 +1115,27 @@ const App: React.FC = () => {
             
             // Fetch RAG context for enhanced recommendations
             let ragContext: string | undefined;
+            
+            // Add web search context if available
+            if (agentStatus?.web && analyzedCompetitors.length > 0) {
+                try {
+                    const firstCompetitor = analyzedCompetitors[0];
+                    const destinations = firstCompetitor.analysis?.destinations || [];
+                    if (destinations.length > 0) {
+                        setRagProgress(prev => ({ ...prev, currentStep: 'Web Search', progress: 15 }));
+                        const webResults = await searchWeb(destinations[0], 'prices', 3);
+                        if (webResults.success && webResults.results?.length > 0) {
+                            const webContext = webResults.results
+                                .map((r: any) => `${r.title}: ${r.text || r.highlights?.join(' ') || ''}`)
+                                .join('\n\n');
+                            ragContext = (ragContext || '') + '\n\n## Current Market Data:\n' + webContext;
+                            console.log('🌐 Added web search context for recommendations');
+                        }
+                    }
+                } catch (webError) {
+                    console.warn('Web search failed:', webError);
+                }
+            }
             if (state.isArangoConnected || state.isChromaConnected) {
                 try {
                     setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 20 }));
@@ -926,7 +1210,7 @@ const App: React.FC = () => {
             const error = e instanceof Error ? e.message : 'Failed to generate recommendations.';
             dispatch({ type: 'FAIL_RECS', payload: error });
         }
-    }, [state.competitors, state.language, state.isArangoConnected, state.isChromaConnected]);
+    }, [state.competitors, state.language, state.isArangoConnected, state.isChromaConnected, useAgenticAnalysis, agentStatus]);
 
     const handleSaveToHistory = async () => {
         const analyzedCompetitors = state.competitors.filter(c => c.analysis);
@@ -1156,7 +1440,15 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col text-on-surface bg-background">
       {/* RAG Progress Overlay */}
-      <RagProgressOverlay progress={ragProgress} />
+      <RagProgressOverlay 
+        progress={ragProgress} 
+        onCancel={() => {
+          console.log('⚠️ Analysis cancelled by user');
+          setRagProgress(prev => ({ ...prev, isActive: false }));
+          // Dispatch to stop analysis state
+          dispatch({ type: 'FAIL_ANALYSIS', payload: 'Analysis cancelled. Using standard analysis mode.' });
+        }}
+      />
       
       <Header />
        <main className="flex-grow p-4 md:p-6 flex gap-4">
@@ -1182,6 +1474,11 @@ const App: React.FC = () => {
             <button onClick={handleAnalyze} disabled={!canAnalyze || state.isAnalyzing} className="flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition-colors bg-primary text-white hover:bg-primary-dark disabled:bg-gray-400 disabled:opacity-75">
                 <AnalyzeIcon />
                 <span>{state.isAnalyzing ? 'Analyzing...' : 'Analyze & Compare'}</span>
+                {agentStatus?.crew && useAgenticAnalysis && (
+                    <span className="ml-1 px-1.5 py-0.5 text-xs bg-white/20 text-white rounded" title="Using CrewAI multi-agent analysis">
+                        🤖
+                    </span>
+                )}
             </button>
              <button onClick={() => dispatch({ type: 'ADD_COMPETITOR' })} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors text-on-surface-variant hover:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-transparent">
                 + Add Itinerary
@@ -1203,7 +1500,56 @@ const App: React.FC = () => {
             <button onClick={handleGenerateRecs} disabled={!isAnalyzed || state.isGeneratingRecs} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors text-on-surface-variant hover:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-transparent">
                 <LightbulbIcon />
                 <span>{state.isGeneratingRecs ? 'Generating...' : 'Get Insights'}</span>
+                {agentStatus?.crew && useAgenticAnalysis && (
+                    <span className="ml-1 px-1.5 py-0.5 text-xs bg-indigo-100 text-indigo-700 rounded" title="Using CrewAI agents">
+                        🤖
+                    </span>
+                )}
             </button>
+            {state.isGeneratingRecs && (
+                <button 
+                    onClick={() => {
+                        dispatch({ type: 'FAIL_RECS', payload: 'Cancelled by user' });
+                        setRagProgress(prev => ({ ...prev, isActive: false }));
+                    }}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold text-red-600 hover:bg-red-50 border border-red-200"
+                    title="Cancel generation"
+                >
+                    ✕ Cancel
+                </button>
+            )}
+            
+            {/* Agent Status Indicator */}
+            {agentStatus && (
+                <div className="flex items-center gap-1 px-2 py-1 rounded text-xs" title="AI Agent Status">
+                    {agentStatus.crew && (
+                        <label className="flex items-center gap-1 px-1.5 py-0.5 bg-green-100 text-green-700 rounded cursor-pointer hover:bg-green-200" title="Toggle Agentic Analysis">
+                            <input
+                                type="checkbox"
+                                checked={useAgenticAnalysis}
+                                onChange={(e) => setUseAgenticAnalysis(e.target.checked)}
+                                className="w-3 h-3"
+                            />
+                            <span>🤖 Crew</span>
+                        </label>
+                    )}
+                    {agentStatus.web && (
+                        <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded" title="Web Search Available">
+                            🌐 Web
+                        </span>
+                    )}
+                    {agentStatus.memory && (
+                        <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded" title="Memory Available">
+                            🧠 Mem
+                        </span>
+                    )}
+                    {!agentStatus.crew && !agentStatus.web && !agentStatus.memory && (
+                        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded" title="Agents not available">
+                            ⚠️ No Agents
+                        </span>
+                    )}
+                </div>
+            )}
              <button onClick={handleSaveToHistory} disabled={!isAnalyzed} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors text-on-surface-variant hover:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-transparent"><SaveIcon /><span>Save</span></button>
              
              {/* Knowledge Base Button */}

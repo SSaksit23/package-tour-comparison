@@ -23,7 +23,7 @@ const FAST_MODEL = 'gpt-4o-mini';  // Faster model for simpler tasks
 const EMBEDDING_MODEL = 'text-embedding-3-small';
 
 /**
- * Make a request to OpenAI Chat API
+ * Make a request to OpenAI Chat API with automatic retry for rate limits
  */
 async function chatCompletion(
     messages: { role: 'system' | 'user' | 'assistant'; content: string | { type: string; text?: string; image_url?: { url: string } }[] }[],
@@ -31,35 +31,72 @@ async function chatCompletion(
         model?: string;
         temperature?: number;
         jsonMode?: boolean;
+        maxRetries?: number;
     } = {}
 ): Promise<string> {
-    const { model = CHAT_MODEL, temperature = 0.7, jsonMode = false } = options;
+    const { model = CHAT_MODEL, temperature = 0.7, jsonMode = false, maxRetries = 3 } = options;
 
     if (!OPENAI_API_KEY) {
         throw new Error('API key is missing. Please provide a valid API key.');
     }
 
-    const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-            model,
-            messages,
-            temperature,
-            ...(jsonMode && { response_format: { type: 'json_object' } })
-        })
-    });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model,
+                    messages,
+                    temperature,
+                    ...(jsonMode && { response_format: { type: 'json_object' } })
+                })
+            });
 
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.error?.message || `OpenAI API error: ${response.status}`);
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                const errorMessage = error.error?.message || `OpenAI API error: ${response.status}`;
+                
+                // Handle rate limiting with exponential backoff
+                if (response.status === 429) {
+                    // Extract wait time from error message if available (e.g., "Please try again in 7.874s")
+                    const waitTimeMatch = errorMessage.match(/try again in (\d+\.?\d*)s/i);
+                    let waitTime = waitTimeMatch 
+                        ? Math.ceil(parseFloat(waitTimeMatch[1]) * 1000) + 500 // Add 500ms buffer
+                        : Math.min(1000 * Math.pow(2, attempt), 30000); // Exponential backoff, max 30s
+                    
+                    if (attempt < maxRetries) {
+                        console.log(`⏳ Rate limited (attempt ${attempt}/${maxRetries}). Waiting ${(waitTime/1000).toFixed(1)}s before retry...`);
+                        await new Promise(r => setTimeout(r, waitTime));
+                        continue;
+                    }
+                }
+                
+                throw new Error(errorMessage);
+            }
+
+            const data = await response.json();
+            if (attempt > 1) {
+                console.log(`✅ Request succeeded on attempt ${attempt}`);
+            }
+            return data.choices[0].message.content;
+            
+        } catch (error) {
+            if (attempt === maxRetries) {
+                throw error;
+            }
+            // For non-rate-limit errors, still retry with backoff
+            const waitTime = 1000 * attempt;
+            console.log(`⚠️ Request failed (attempt ${attempt}/${maxRetries}): ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.log(`⏳ Retrying in ${waitTime}ms...`);
+            await new Promise(r => setTimeout(r, waitTime));
+        }
     }
-
-    const data = await response.json();
-    return data.choices[0].message.content;
+    
+    throw new Error('All API request attempts failed');
 }
 
 /**

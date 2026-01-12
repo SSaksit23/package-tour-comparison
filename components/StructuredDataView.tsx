@@ -99,8 +99,8 @@ const FlightsSection: React.FC<{flights: ItineraryData['flights']}> = ({flights}
                     <div key={route}>
                         <p className="font-semibold text-gray-800">{route}</p>
                         <div className="mt-1 space-y-1.5">
-                            {Array.isArray(flights) && flights.map((flight) => (
-                                <div key={flight.flightNumber} className="flex justify-between items-center gap-2">
+                            {Array.isArray(flights) && flights.map((flight, index) => (
+                                <div key={`${route}-${flight.flightNumber}-${index}-${flight.departureTime}`} className="flex justify-between items-center gap-2">
                                     <div className="text-xs text-gray-500 whitespace-nowrap">
                                         <span>{flight.departureTime} → {flight.arrivalTime}</span>
                                         <span className="ml-2 pl-2 border-l border-gray-300">{flight.flightTime}</span>

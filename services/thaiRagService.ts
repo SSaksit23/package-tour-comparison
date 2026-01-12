@@ -5,7 +5,7 @@
  */
 
 import { Document, ChatMessage } from '../types';
-import { embedText as openaiEmbed, generateAnswer } from './aiService';
+import { embedText as openaiEmbed, generateAnswer } from './aiProvider';
 
 // Thai character detection patterns
 const THAI_PATTERN = /[\u0E00-\u0E7F]/;

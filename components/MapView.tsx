@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import L from 'leaflet';
 import { Competitor, DailyRoute, GeoLocation } from '../types';
-import { getCoordinatesForLocations, getRouteDetailsForDay } from '../services/geminiService';
+import { getCoordinatesForLocations, getRouteDetailsForDay } from '../services/aiProvider';
 import { MapIcon } from './icons/MapIcon';
 
 // Fix Leaflet's default icon path issues that can occur with module bundlers/ESM.

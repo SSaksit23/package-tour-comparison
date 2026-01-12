@@ -1,4 +1,30 @@
 services:
+  # Backend Service - PDF Extraction + AI Agents
+  # - PyMuPDF for reliable PDF text extraction
+  # - CrewAI for multi-agent analysis
+  # - Mem0 for persistent memory
+  # - EXA for web search
+  pdf-extractor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: itin-backend
+    ports:
+      - "5001:5001"
+    environment:
+      # AI Provider (for CrewAI agents)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Web Search (EXA)
+      - EXA_API_KEY=${EXA_API_KEY}
+      # Agent Observability (optional)
+      - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   # ArangoDB - Multi-model Database (Graph + Vector + Document)
   # Provides unified hybrid RAG with graph traversal and vector search
   arangodb:
@@ -38,13 +64,16 @@ services:
       target: development
     container_name: itin-analyzer-dev
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       # Mount source code for hot reload
       - .:/app
       # Keep node_modules from container
       - /app/node_modules
     environment:
+      # PDF Extractor service (PyMuPDF backend)
+      - PDF_EXTRACTOR_URL=http://localhost:5001
+      - PDF_EXTRACTOR_INTERNAL_URL=http://pdf-extractor:5001
       # ArangoDB connection (primary - for hybrid RAG)
       - ARANGO_URL=http://localhost:8529
       - ARANGO_INTERNAL_URL=http://arangodb:8529
@@ -55,6 +84,8 @@ services:
       - CHROMA_URL=http://localhost:8000
       - CHROMA_INTERNAL_URL=http://chromadb:8000
     depends_on:
+      pdf-extractor:
+        condition: service_healthy
       arangodb:
         condition: service_healthy
       chromadb:

@@ -5,10 +5,12 @@ import StructuredDataView from './StructuredDataView';
 import QnaView from './QnaView';
 import ComparisonView from './ComparisonView';
 import InsightsView from './InsightsView';
+import ClusterView from './ClusterView';
 import { DataIcon } from './icons/DataIcon';
 import { ChatBubbleIcon } from './icons/ChatBubbleIcon';
 import { CompareIcon } from './icons/CompareIcon';
 import { LightbulbIcon } from './icons/LightbulbIcon';
+import { ClusterIcon } from './icons/ClusterIcon';
 
 
 interface AnalysisOutputProps {
@@ -27,7 +29,7 @@ interface AnalysisOutputProps {
   ragDocCount?: number;
 }
 
-type Tab = 'data' | 'compare' | 'qna' | 'insights';
+type Tab = 'data' | 'compare' | 'cluster' | 'qna' | 'insights';
 
 const AnalysisOutput: React.FC<AnalysisOutputProps> = ({
   competitors,
@@ -65,6 +67,7 @@ const AnalysisOutput: React.FC<AnalysisOutputProps> = ({
     { id: 'insights', label: 'Insights', icon: <LightbulbIcon />, disabled: !hasContent },
     { id: 'data', label: 'Structured Data', icon: <DataIcon />, disabled: !hasContent },
     { id: 'compare', label: 'Comparison', icon: <CompareIcon />, disabled: activeCompetitors.length < 2},
+    { id: 'cluster', label: 'Segments', icon: <ClusterIcon />, disabled: activeCompetitors.length < 2},
     { id: 'qna', label: 'Q&A', icon: <ChatBubbleIcon />, disabled: documents.length === 0 },
   ];
 
@@ -75,7 +78,9 @@ const AnalysisOutput: React.FC<AnalysisOutputProps> = ({
       case 'data':
         return <StructuredDataView competitors={competitors} isLoading={isLoading} />;
       case 'compare':
-        return <ComparisonView comparison={comparison} isLoading={isLoading} />;
+        return <ComparisonView comparison={comparison} competitors={competitors} isLoading={isLoading} />;
+      case 'cluster':
+        return <ClusterView competitors={competitors} language={language} />;
       case 'qna':
         return (
           <QnaView

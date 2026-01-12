@@ -1,0 +1,31 @@
+# Test Dockerfile
+# Builds an image specifically for running tests in Docker
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies needed for tests
+RUN apk add --no-cache \
+    curl \
+    git
+
+# Copy package files
+COPY package.json package-lock.json* ./
+
+# Install dependencies (including dev dependencies for testing)
+RUN npm ci
+
+# Copy source code and test files
+COPY . .
+
+# Create directories for test results and coverage
+RUN mkdir -p test-results coverage
+
+# Expose port (not used, but kept for consistency)
+EXPOSE 3000
+
+# Default command runs tests
+# Can be overridden in docker-compose
+CMD ["npm", "test"]
+

@@ -49,8 +49,15 @@ export default defineConfig(() => {
     // Load from .env file
     const fileEnv = loadEnvFile();
     
-    // Get values with fallbacks - OpenAI API key
+    // Get values with fallbacks - AI Provider keys
     const openaiApiKey = fileEnv.OPENAI_API_KEY || process.env.OPENAI_API_KEY || '';
+    const geminiApiKey = fileEnv.VITE_GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+    const aiProvider = fileEnv.VITE_AI_PROVIDER || process.env.VITE_AI_PROVIDER || 'auto';
+    
+    // Vertex AI - Enterprise reliability
+    const vertexProjectId = fileEnv.VITE_VERTEX_PROJECT_ID || process.env.VITE_VERTEX_PROJECT_ID || '';
+    const vertexLocation = fileEnv.VITE_VERTEX_LOCATION || process.env.VITE_VERTEX_LOCATION || 'us-central1';
+    const vertexApiKey = fileEnv.VITE_VERTEX_API_KEY || process.env.VITE_VERTEX_API_KEY || '';
     
     // ArangoDB - Unified Hybrid RAG (Graph + Vector)
     const arangoUrl = fileEnv.ARANGO_URL || process.env.ARANGO_URL || 'http://localhost:8529';
@@ -67,16 +74,34 @@ export default defineConfig(() => {
     const openthaiEnabled = fileEnv.OPENTHAI_ENABLED || process.env.OPENTHAI_ENABLED || 'false';
     const openthaiUrl = fileEnv.OPENTHAI_API_URL || process.env.OPENTHAI_API_URL || 'http://localhost:5000';
     
+    // PDF Extractor - PyMuPDF backend for reliable PDF extraction
+    const pdfExtractorUrl = fileEnv.PDF_EXTRACTOR_URL || process.env.PDF_EXTRACTOR_URL || 'http://localhost:5001';
+    const pdfExtractorInternalUrl = process.env.PDF_EXTRACTOR_INTERNAL_URL || 'http://pdf-extractor:5001';
+    
     // Log status
+    if (vertexProjectId && vertexApiKey) {
+        console.log('✅ Vertex AI configured:', vertexProjectId, '@', vertexLocation);
+    }
+    if (geminiApiKey) {
+        console.log('✅ VITE_GEMINI_API_KEY loaded:', geminiApiKey.substring(0, 10) + '...');
+    }
     if (openaiApiKey) {
         console.log('✅ OPENAI_API_KEY loaded:', openaiApiKey.substring(0, 10) + '...');
-    } else {
-        console.warn('\n⚠️  WARNING: OPENAI_API_KEY is not set!');
-        console.warn('   Add OPENAI_API_KEY=your_key to your .env file\n');
     }
+    if (!geminiApiKey && !openaiApiKey && !vertexApiKey) {
+        console.warn('\n⚠️  WARNING: No AI API keys set!');
+        console.warn('   Add VITE_VERTEX_API_KEY, VITE_GEMINI_API_KEY, or OPENAI_API_KEY to your .env file\n');
+    }
+    const availableProviders = [
+        vertexApiKey ? 'Vertex' : null,
+        geminiApiKey ? 'Gemini' : null,
+        openaiApiKey ? 'OpenAI' : null
+    ].filter(Boolean).join(', ');
+    console.log('🤖 AI Provider:', aiProvider, `(Available: ${availableProviders || 'none'})`);
     
     console.log('🔗 ArangoDB URL:', arangoUrl);
     console.log('📊 ChromaDB URL:', chromaUrl);
+    console.log('📄 PDF Extractor URL:', pdfExtractorUrl);
     
     return {
         server: {
@@ -102,6 +127,12 @@ export default defineConfig(() => {
                     target: chromaInternalUrl,
                     changeOrigin: true,
                     rewrite: (path: string) => path.replace(/^\/chroma-api/, '/api/v2'),
+                },
+                // Proxy PDF Extractor requests (PyMuPDF backend)
+                '/pdf-api': {
+                    target: pdfExtractorInternalUrl,
+                    changeOrigin: true,
+                    rewrite: (path: string) => path.replace(/^\/pdf-api/, ''),
                 }
             }
         },
@@ -109,6 +140,13 @@ export default defineConfig(() => {
         define: {
             'process.env.OPENAI_API_KEY': JSON.stringify(openaiApiKey),
             'process.env.API_KEY': JSON.stringify(openaiApiKey), // Backward compatibility
+            // Gemini AI (good free tier)
+            'process.env.VITE_GEMINI_API_KEY': JSON.stringify(geminiApiKey),
+            'process.env.VITE_AI_PROVIDER': JSON.stringify(aiProvider),
+            // Vertex AI (enterprise reliability)
+            'process.env.VITE_VERTEX_PROJECT_ID': JSON.stringify(vertexProjectId),
+            'process.env.VITE_VERTEX_LOCATION': JSON.stringify(vertexLocation),
+            'process.env.VITE_VERTEX_API_KEY': JSON.stringify(vertexApiKey),
             // ArangoDB (primary - hybrid RAG)
             'process.env.ARANGO_URL': JSON.stringify(arangoUrl),
             'process.env.ARANGO_USER': JSON.stringify(arangoUser),
@@ -118,7 +156,9 @@ export default defineConfig(() => {
             'process.env.CHROMA_URL': JSON.stringify(chromaUrl),
             // OpenThaiGPT (optional)
             'process.env.OPENTHAI_ENABLED': JSON.stringify(openthaiEnabled),
-            'process.env.OPENTHAI_API_URL': JSON.stringify(openthaiUrl)
+            'process.env.OPENTHAI_API_URL': JSON.stringify(openthaiUrl),
+            // PDF Extractor (PyMuPDF backend)
+            'process.env.PDF_EXTRACTOR_URL': JSON.stringify(pdfExtractorUrl)
         },
         resolve: {
             alias: {

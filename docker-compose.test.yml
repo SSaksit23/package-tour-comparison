@@ -1,0 +1,51 @@
+services:
+  # ChromaDB for vector database testing
+  chromadb-test:
+    image: chromadb/chroma:latest
+    container_name: itin-chromadb-test
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_test_data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+      - ALLOW_RESET=TRUE
+      - IS_PERSISTENT=TRUE
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/api/v2\")' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Test Runner Container
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: itin-test-runner
+    depends_on:
+      chromadb-test:
+        condition: service_healthy
+    environment:
+      # ChromaDB connection for tests
+      - CHROMA_URL=http://chromadb-test:8000
+      - NODE_ENV=test
+      # AI API Keys (optional - some tests may skip if not provided)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - VITE_GEMINI_API_KEY=${VITE_GEMINI_API_KEY:-}
+      - VITE_VERTEX_API_KEY=${VITE_VERTEX_API_KEY:-}
+    volumes:
+      # Mount source code
+      - .:/app
+      # Keep node_modules from container
+      - /app/node_modules
+      # Mount test results
+      - ./test-results:/app/test-results
+      - ./coverage:/app/coverage
+    command: npm test
+
+volumes:
+  chroma_test_data:
+

@@ -6,7 +6,7 @@
  */
 
 import { Document } from '../types';
-import { embedText } from './aiService';
+import { embedText } from './aiProvider';
 
 // ChromaDB configuration
 // In development, use the Vite proxy to avoid CORS issues

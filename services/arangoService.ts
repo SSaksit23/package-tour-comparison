@@ -12,7 +12,7 @@
  */
 
 import { Document, ChatMessage } from '../types';
-import { embedText, generateAnswer } from './aiService';
+import { embedText, generateAnswer } from './aiProvider';
 import { smartEmbed, chunkThaiText, extractThaiEntities, detectLanguage, generateThaiAwareAnswer } from './thaiRagService';
 
 // ArangoDB configuration
@@ -208,6 +208,20 @@ class ArangoHybridRAG {
 
     private async createCollectionIfNotExists(name: string, type: 'document' | 'edge'): Promise<void> {
         try {
+            // First check if collection exists to avoid 409 errors in console
+            const checkResponse = await fetch(`${this.apiPath}/collection/${name}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': this.auth
+                }
+            });
+            
+            if (checkResponse.ok) {
+                // Collection already exists, skip creation
+                return;
+            }
+            
+            // Collection doesn't exist, create it
             const response = await fetch(`${this.apiPath}/collection`, {
                 method: 'POST',
                 headers: {
@@ -220,13 +234,12 @@ class ArangoHybridRAG {
                 })
             });
             
-            // 409 = collection already exists, which is fine
             if (response.ok) {
                 console.log(`📁 Created collection: ${name}`);
             }
-            // Silently ignore 409 Conflict (already exists)
+            // Silently ignore any other errors (409, etc.)
         } catch {
-            // Network error - collection might already exist
+            // Network error - ArangoDB might not be running
         }
     }
 

@@ -8,7 +8,7 @@
  */
 
 import { Document, ChatMessage } from '../types';
-import { embedText, generateAnswer } from './aiService';
+import { embedText, generateAnswer } from './aiProvider';
 import { searchChroma, indexDocumentInChroma, removeDocumentFromChroma, isChromaAvailable, ChromaSearchResult } from './chromaService';
 import { getKnowledgeGraph, extractEntities } from './neo4jService';
 import { indexDocumentForRAG, removeDocumentFromRAG } from './ragService';

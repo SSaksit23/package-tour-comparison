@@ -1,0 +1,66 @@
+# Local Development Docker Compose
+# Run with: docker-compose -f docker-compose.local.yml up --build
+#
+# This starts:
+# - Frontend (React + Vite) on http://localhost:3000
+# - Backend (Python + AI Agents) on http://localhost:5001
+
+services:
+  # Backend Service - PDF Extraction + AI Agents
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: itin-backend
+    ports:
+      - "5001:5001"
+    environment:
+      # AI Provider - Required for CrewAI agents
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Gemini API - Alternative AI provider
+      - VITE_GEMINI_API_KEY=${VITE_GEMINI_API_KEY:-}
+      # Web Search (EXA) - Optional
+      - EXA_API_KEY=${EXA_API_KEY:-}
+      # Agent Observability - Optional
+      - AGENTOPS_API_KEY=${AGENTOPS_API_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Frontend Service - React + Vite
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: itin-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # Backend URL (internal Docker network)
+      - PDF_EXTRACTOR_URL=http://backend:5001
+      - PDF_EXTRACTOR_INTERNAL_URL=http://backend:5001
+      # AI Providers (passed from .env)
+      - VITE_GEMINI_API_KEY=${VITE_GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - VITE_AI_PROVIDER=${VITE_AI_PROVIDER:-auto}
+      # Vertex AI (optional)
+      - VITE_VERTEX_PROJECT_ID=${VITE_VERTEX_PROJECT_ID:-}
+      - VITE_VERTEX_LOCATION=${VITE_VERTEX_LOCATION:-us-central1}
+      - VITE_VERTEX_API_KEY=${VITE_VERTEX_API_KEY:-}
+    volumes:
+      # Mount source for hot reload
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  default:
+    name: itin-network
+

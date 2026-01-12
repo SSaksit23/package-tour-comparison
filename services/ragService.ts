@@ -10,7 +10,7 @@
  */
 
 import { Document } from '../types';
-import { embedText, generateAnswer } from './aiService';
+import { embedText, generateAnswer } from './aiProvider';
 
 // OpenAI API configuration for entity extraction
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';

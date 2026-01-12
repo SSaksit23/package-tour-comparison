@@ -4,7 +4,7 @@
  */
 
 import { Document } from '../types';
-import { embedText } from './aiService';
+import { embedText } from './aiProvider';
 
 // Neo4j connection configuration from environment
 // Supports both local Docker (bolt://) and Neo4j Aura (neo4j+s://)

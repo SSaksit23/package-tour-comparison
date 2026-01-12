@@ -17,12 +17,14 @@ export interface RagProgressState {
         totalChunks?: number;
         entitiesFound?: number;
         searchResults?: number;
+        agent?: string; // Agent name (e.g., 'CrewAI')
     };
     startTime?: number;
 }
 
 interface RagProgressOverlayProps {
     progress: RagProgressState;
+    onCancel?: () => void;
 }
 
 const StepIcon: React.FC<{ step: string; isActive: boolean; isComplete: boolean }> = ({ step, isActive, isComplete }) => {
@@ -79,21 +81,21 @@ const getStepsForOperation = (operation: RagProgressState['operation']) => {
             ];
         case 'analyzing':
             return [
-                { id: 1, label: 'RAG Search', description: 'Finding relevant knowledge' },
-                { id: 2, label: 'Analyzing', description: 'Processing documents' },
-                { id: 3, label: 'Comparing', description: 'Generating insights' },
+                { id: 1, label: 'Document Analyst', description: 'Extracting structured data' },
+                { id: 2, label: 'Market Researcher', description: 'Researching market context' },
+                { id: 3, label: 'Strategic Advisor', description: 'Generating recommendations' },
             ];
         default:
             return [];
     }
 };
 
-const getOperationTitle = (operation: RagProgressState['operation']) => {
+const getOperationTitle = (operation: RagProgressState['operation'], agent?: string) => {
     switch (operation) {
         case 'indexing': return '📚 Indexing Document';
         case 'searching': return '🔍 Searching Knowledge Base';
         case 'generating': return '💬 Generating Response';
-        case 'analyzing': return '📊 Analyzing with RAG';
+        case 'analyzing': return agent ? '🤖 Agentic Analysis' : '📊 Analyzing with RAG';
         default: return 'Processing...';
     }
 };
@@ -108,7 +110,7 @@ const getOperationColor = (operation: RagProgressState['operation']) => {
     }
 };
 
-export const RagProgressOverlay: React.FC<RagProgressOverlayProps> = ({ progress }) => {
+export const RagProgressOverlay: React.FC<RagProgressOverlayProps> = ({ progress, onCancel }) => {
     if (!progress.isActive) return null;
     
     const steps = getStepsForOperation(progress.operation);
@@ -130,11 +132,16 @@ export const RagProgressOverlay: React.FC<RagProgressOverlayProps> = ({ progress
                 {/* Header */}
                 <div className="text-center">
                     <h3 className="text-xl font-bold text-gray-800">
-                        {getOperationTitle(progress.operation)}
+                        {getOperationTitle(progress.operation, progress.details?.agent)}
                     </h3>
                     <p className="text-sm text-gray-500 mt-1">
                         {progress.currentStep}
                     </p>
+                    {progress.details?.agent && (
+                        <p className="text-xs text-indigo-600 mt-1 font-semibold">
+                            🤖 Powered by {progress.details.agent}
+                        </p>
+                    )}
                 </div>
                 
                 {/* Progress Bar */}
@@ -216,6 +223,18 @@ export const RagProgressOverlay: React.FC<RagProgressOverlayProps> = ({ progress
                                 </span>
                             </div>
                         )}
+                    </div>
+                )}
+                
+                {/* Cancel Button - only show for agentic analysis */}
+                {onCancel && progress.operation === 'analyzing' && progress.details?.agent && (
+                    <div className="flex justify-center pt-2">
+                        <button
+                            onClick={onCancel}
+                            className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+                        >
+                            Cancel & Use Standard Analysis
+                        </button>
                     </div>
                 )}
                 
