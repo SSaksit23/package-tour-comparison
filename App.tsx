@@ -20,7 +20,6 @@ import { LightbulbIcon } from './components/icons/LightbulbIcon';
 import { LanguageIcon } from './components/icons/LanguageIcon';
 import { exportToPdf, exportToExcel } from './services/exportService';
 import { DocumentTextIcon } from './components/icons/DocumentTextIcon';
-import { initializeKnowledgeGraph } from './services/neo4jService';
 import { hybridRagQuery, indexDocumentHybrid, removeDocumentHybrid, isHybridRagAvailable, getHybridRagStats } from './services/hybridRagService';
 import { isChromaAvailable, indexDocumentInChroma } from './services/chromaService';
 import { isArangoAvailable, initializeArangoRAG, indexDocumentInArango, removeDocumentFromArango, arangoHybridQuery, hybridSearch, getArangoStats } from './services/arangoService';
@@ -53,7 +52,6 @@ type Action =
   | { type: 'ADD_DOCUMENT_SUCCESS'; payload: Document }
   | { type: 'REMOVE_DOCUMENT_SUCCESS'; payload: number }
   | { type: 'ADD_COMPETITOR_WITH_FILE'; payload: { id: string; file: File; name: string } }
-  | { type: 'SET_NEO4J_CONNECTED'; payload: boolean }
   | { type: 'SET_CHROMA_CONNECTED'; payload: boolean }
   | { type: 'SET_ARANGO_CONNECTED'; payload: boolean }
   | { type: 'SET_UPLOAD_PROGRESS'; payload: UploadProgress | null }
@@ -70,7 +68,6 @@ const initialState: AppState = {
   isGeneratingRecs: false,
   analysisError: null,
   language: 'English',
-  isNeo4jConnected: false,
   isChromaConnected: false,
   isArangoConnected: false,
   uploadProgress: null,
@@ -204,9 +201,7 @@ const appReducer = (state: AppState, action: Action): AppState => {
           ]
       };
     case 'CLEAR_ALL':
-      return {...initialState, documents: state.documents, isNeo4jConnected: state.isNeo4jConnected, isChromaConnected: state.isChromaConnected, isArangoConnected: state.isArangoConnected, uploadProgress: null}; // Keep knowledge base and connection status on clear all
-    case 'SET_NEO4J_CONNECTED':
-      return { ...state, isNeo4jConnected: action.payload };
+      return {...initialState, documents: state.documents, isChromaConnected: state.isChromaConnected, isArangoConnected: state.isArangoConnected, uploadProgress: null}; // Keep knowledge base and connection status on clear all
     case 'SET_CHROMA_CONNECTED':
       return { ...state, isChromaConnected: action.payload };
     case 'SET_ARANGO_CONNECTED':
@@ -316,15 +311,6 @@ const App: React.FC = () => {
             setHistory(savedHistory);
             const savedDocs = await dbService.getAllDocuments();
             dispatch({type: 'SET_DOCUMENTS', payload: savedDocs});
-            
-            // Initialize Neo4j Knowledge Graph
-            const neo4jConnected = await initializeKnowledgeGraph();
-            dispatch({ type: 'SET_NEO4J_CONNECTED', payload: neo4jConnected });
-            if (neo4jConnected) {
-                console.log('✅ Neo4j Knowledge Graph connected');
-            } else {
-                console.log('⚠️ Neo4j not available - using local storage only');
-            }
             
             // Check ChromaDB Vector Store availability (backup)
             const chromaConnected = await isChromaAvailable();
@@ -719,7 +705,7 @@ const App: React.FC = () => {
     }, [state.documents, state.isArangoConnected, state.isChromaConnected]);
 
 
-    // Orchestrate Q&A with Hybrid RAG pipeline (ChromaDB + Neo4j)
+    // Orchestrate Q&A with Hybrid RAG pipeline (ArangoDB or ChromaDB)
     const handleGetAnswer = async (history: ChatMessage[], question: string): Promise<string> => {
         const startTime = Date.now();
         
@@ -732,17 +718,21 @@ const App: React.FC = () => {
             startTime
         });
         
+        // Track sources used
+        const sourcesUsed: string[] = [];
+        
         try {
             // 1. Try ArangoDB Hybrid RAG (Graph + Vector in one database)
             if (state.isArangoConnected) {
                 try {
-                    setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 30 }));
+                    setRagProgress(prev => ({ ...prev, currentStep: 'Searching Vector DB', progress: 30 }));
+                    console.log('🔍 Q&A: Attempting ArangoDB Hybrid Search...');
                     
                     const hybridResponse = await arangoHybridQuery(question, history, state.language);
                     
                     setRagProgress(prev => ({ 
                         ...prev, 
-                        currentStep: 'Generating', 
+                        currentStep: 'Processing Results', 
                         progress: 70,
                         details: {
                             searchResults: hybridResponse.sources.vectorResults + hybridResponse.sources.graphResults,
@@ -752,20 +742,27 @@ const App: React.FC = () => {
                     
                     console.log(`🔗 ArangoDB Hybrid RAG: Vector=${hybridResponse.sources.vectorResults}, Graph=${hybridResponse.sources.graphResults}, Entities=${hybridResponse.sources.entities.length}, Time=${hybridResponse.processingTime}ms`);
                     
-                    if (hybridResponse.sources.vectorResults > 0 || hybridResponse.sources.graphResults > 0) {
+                    // Always try to use ArangoDB results even if count is 0 but answer exists
+                    if (hybridResponse.answer && (hybridResponse.sources.vectorResults > 0 || hybridResponse.sources.graphResults > 0 || hybridResponse.sources.entities.length > 0)) {
                         setRagProgress(prev => ({ ...prev, currentStep: 'Formatting', progress: 100 }));
                         setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+                        setLastRagUsage({ used: true, docCount: hybridResponse.sources.vectorResults + hybridResponse.sources.graphResults });
+                        console.log('✅ Q&A: Using ArangoDB results');
                         return hybridResponse.answer;
                     }
+                    console.log('⚠️ Q&A: ArangoDB returned no results, trying fallbacks...');
                 } catch (e) {
-                    console.warn('ArangoDB Hybrid RAG query failed, trying fallback:', e);
+                    console.warn('❌ Q&A: ArangoDB Hybrid RAG query failed:', e);
                 }
+            } else {
+                console.log('⚠️ Q&A: ArangoDB not connected');
             }
             
-            // 2. Fallback to Neo4j + ChromaDB Hybrid RAG if available
-            if (state.isNeo4jConnected) {
+            // 2. Fallback to ChromaDB Vector Search if available
+            if (state.isChromaConnected) {
                 try {
-                    setRagProgress(prev => ({ ...prev, currentStep: 'Searching', progress: 40 }));
+                    setRagProgress(prev => ({ ...prev, currentStep: 'ChromaDB Search', progress: 40 }));
+                    console.log('🔍 Q&A: Attempting ChromaDB Search...');
                     
                     const hybridResponse = await hybridRagQuery(question, history, state.language);
                     
@@ -774,28 +771,37 @@ const App: React.FC = () => {
                         currentStep: 'Generating', 
                         progress: 70,
                         details: {
-                            searchResults: hybridResponse.sources.chromaResults + hybridResponse.sources.neo4jResults
+                            searchResults: hybridResponse.sources.chromaResults
                         }
                     }));
                     
-                    console.log(`🔄 Neo4j Hybrid RAG: Chroma=${hybridResponse.sources.chromaResults}, Neo4j=${hybridResponse.sources.neo4jResults}, Time=${hybridResponse.processingTime}ms`);
+                    console.log(`🔄 ChromaDB RAG: ${hybridResponse.sources.chromaResults} results, Time=${hybridResponse.processingTime}ms`);
                     
-                    if (hybridResponse.sources.chromaResults > 0 || hybridResponse.sources.neo4jResults > 0) {
+                    if (hybridResponse.sources.chromaResults > 0) {
                         setRagProgress(prev => ({ ...prev, currentStep: 'Formatting', progress: 100 }));
                         setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+                        setLastRagUsage({ used: true, docCount: hybridResponse.sources.chromaResults });
+                        console.log('✅ Q&A: Using ChromaDB results');
                         return hybridResponse.answer;
                     }
+                    console.log('⚠️ Q&A: ChromaDB returned no results');
                 } catch (e) {
-                    console.warn('Neo4j Hybrid RAG query failed, falling back to local:', e);
+                    console.warn('❌ Q&A: ChromaDB RAG query failed:', e);
                 }
+            } else {
+                console.log('⚠️ Q&A: ChromaDB not connected');
             }
             
-            // 3. Fallback to local documents if Hybrid RAG not available
-            setRagProgress(prev => ({ ...prev, currentStep: 'Context', progress: 50 }));
+            // 3. Fallback to local documents if Hybrid RAG not available or returned no results
+            console.log('📄 Q&A: Using local documents fallback');
+            setRagProgress(prev => ({ ...prev, currentStep: 'Local Documents', progress: 50 }));
             
             let contextText = "";
             if (state.documents.length > 0) {
-                contextText += "## Local Documents:\n" + state.documents.map(d => `### ${d.name}\n${d.text}`).join('\n\n') + "\n\n";
+                // Add document names as sources
+                state.documents.forEach(d => sourcesUsed.push(d.name));
+                contextText += "## Knowledge Base Documents:\n" + state.documents.map(d => `### ${d.name}\n${d.text}`).join('\n\n') + "\n\n";
+                console.log(`📚 Q&A: Using ${state.documents.length} local documents as context`);
             }
 
             setRagProgress(prev => ({ ...prev, currentStep: 'Generating', progress: 80 }));
@@ -803,10 +809,16 @@ const App: React.FC = () => {
             // 4. Generate Answer with local context
             const answer = await generateAnswer(history, contextText, question, state.language);
             
+            // Append sources to answer
+            const sourcesText = sourcesUsed.length > 0 
+                ? `\n\n---\n📚 **Sources:** ${sourcesUsed.join(', ')}`
+                : '';
+            
             setRagProgress(prev => ({ ...prev, currentStep: 'Formatting', progress: 100 }));
             setTimeout(() => setRagProgress(prev => ({ ...prev, isActive: false })), 500);
+            setLastRagUsage({ used: false, docCount: state.documents.length });
             
-            return answer;
+            return answer + sourcesText;
         } catch (error) {
             setRagProgress(prev => ({ ...prev, isActive: false }));
             throw error;
@@ -1265,11 +1277,11 @@ const App: React.FC = () => {
                 } catch (e) {
                     console.warn('Failed to remove from ArangoDB:', e);
                 }
-            } else if (state.isNeo4jConnected) {
+            } else if (state.isChromaConnected) {
                 try {
                     await removeDocumentHybrid(id);
                 } catch (e) {
-                    console.warn('Failed to remove from Hybrid RAG:', e);
+                    console.warn('Failed to remove from ChromaDB:', e);
                 }
             }
         }
@@ -1340,21 +1352,26 @@ const App: React.FC = () => {
                         ))
                     )}
                     <div className="p-3 bg-gray-50 border-t space-y-2">
-                        {state.isNeo4jConnected && (
+                        {state.isArangoConnected && (
                             <div className="flex items-center gap-2 text-xs text-green-700 bg-green-50 px-3 py-2 rounded-lg">
                                 <DataIcon className="h-4 w-4" />
                                 <div className="flex-1">
                                     <span className="font-semibold">🔄 Hybrid RAG Active</span>
                                     <p className="text-green-600 mt-0.5">
-                                        <strong>ChromaDB:</strong> Vector similarity search | 
-                                        <strong> Neo4j:</strong> Graph traversal & entity relationships
+                                        <strong>ArangoDB:</strong> Vector similarity + Graph traversal
                                     </p>
                                 </div>
                             </div>
                         )}
-                        {!state.isNeo4jConnected && state.documents.length > 0 && (
+                        {!state.isArangoConnected && state.isChromaConnected && (
+                            <div className="flex items-center gap-2 text-xs text-blue-700 bg-blue-50 px-3 py-2 rounded-lg">
+                                <DataIcon className="h-4 w-4" />
+                                <span>🔍 ChromaDB Vector Search Active</span>
+                            </div>
+                        )}
+                        {!state.isArangoConnected && !state.isChromaConnected && state.documents.length > 0 && (
                             <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 px-3 py-2 rounded-lg">
-                                <span>⚠️ Hybrid RAG not connected - using basic text matching</span>
+                                <span>⚠️ Database not connected - using local text matching</span>
                             </div>
                         )}
                         {/* Upload Progress Indicator */}
@@ -1589,7 +1606,7 @@ const App: React.FC = () => {
                                 </button>
                                 <button onClick={() => setSavedPanelTab('kb')} className={`flex-1 py-3 px-1 text-center border-b-2 font-medium text-sm ${savedPanelTab === 'kb' ? 'border-primary text-primary' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}>
                                     Knowledge Base ({state.documents.length})
-                                    {state.isNeo4jConnected && <span className="ml-1 inline-block w-2 h-2 bg-green-500 rounded-full" title="Neo4j Connected"></span>}
+                                    {state.isArangoConnected && <span className="ml-1 inline-block w-2 h-2 bg-green-500 rounded-full" title="ArangoDB Connected"></span>}
                                 </button>
                             </nav>
                         </div>

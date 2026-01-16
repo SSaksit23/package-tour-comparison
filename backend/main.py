@@ -11,6 +11,7 @@ This service provides:
 import io
 import os
 import re
+from datetime import datetime
 from typing import Optional, List
 from fastapi import FastAPI, File, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -762,6 +763,1080 @@ async def consultant_status():
         return {"available": False, "reason": "CrewAI not installed"}
     
     return agent.get_status()
+
+
+# --- Agentic Web Research Endpoint ---
+
+class WebResearchRequest(BaseModel):
+    itinerary_data: dict  # Analyzed itinerary data
+    mode: str = "fast"  # "full" for complete crew analysis, "fast" for quick search
+    max_results: int = 5
+
+@app.post("/agents/research/web-packages")
+async def research_web_packages(request: WebResearchRequest):
+    """
+    Find comparable tour packages using agentic web research.
+    
+    This endpoint uses AI agents to:
+    1. Generate effective search queries based on the itinerary
+    2. Search the web for similar packages
+    3. Extract and structure the found packages
+    
+    Args:
+        itinerary_data: Analyzed itinerary with destinations, duration, etc.
+        mode: "fast" for quick EXA search, "full" for complete CrewAI analysis
+        max_results: Maximum packages to return
+    
+    Returns:
+        List of comparable packages found online
+    """
+    import time
+    start_time = time.time()
+    
+    # Get search agent
+    web_agent = get_web_search_agent()
+    
+    # Extract key info from itinerary
+    destinations = request.itinerary_data.get("destinations", [])
+    duration = request.itinerary_data.get("duration", "")
+    tour_name = request.itinerary_data.get("tourName", "")
+    
+    if not destinations:
+        return JSONResponse(content={
+            "success": False,
+            "error": "No destinations found in itinerary data",
+            "found_packages": []
+        })
+    
+    main_destination = destinations[0] if destinations else ""
+    
+    # Build search queries
+    queries = [
+        f"{main_destination} tour package {duration} 2025",
+        f"{main_destination} travel itinerary price inclusions",
+    ]
+    
+    if len(destinations) > 1:
+        queries.append(f"{' '.join(destinations[:3])} multi-city tour package")
+    
+    print(f"🔍 Web research for: {main_destination} ({request.mode} mode)")
+    
+    found_packages = []
+    queries_used = []
+    
+    try:
+        if request.mode == "fast" and web_agent and web_agent.available:
+            # Fast mode: Use EXA directly
+            for query in queries[:2]:
+                queries_used.append(query)
+                result = web_agent.search(query, num_results=3)
+                
+                if result.get("success"):
+                    for item in result.get("results", []):
+                        # Extract package info
+                        pkg = {
+                            "name": item.get("title", "Found Package"),
+                            "operator": None,
+                            "destinations": destinations,
+                            "duration": duration,
+                            "price_range": None,
+                            "currency": None,
+                            "inclusions": [],
+                            "exclusions": [],
+                            "highlights": [item.get("text", "")[:300] if item.get("text") else ""],
+                            "source_url": item.get("url", ""),
+                            "confidence": "medium"
+                        }
+                        
+                        # Try to extract price from text
+                        import re
+                        text = item.get("text", "")
+                        price_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*(?:บาท|THB|USD|\$)', text, re.IGNORECASE)
+                        if price_match:
+                            pkg["price_range"] = price_match.group(1)
+                            pkg["currency"] = "THB" if "บาท" in text or "THB" in text else "USD"
+                        
+                        found_packages.append(pkg)
+                        
+                        if len(found_packages) >= request.max_results:
+                            break
+                
+                if len(found_packages) >= request.max_results:
+                    break
+        
+        elif request.mode == "full":
+            # Full mode: Use CrewAI crew
+            crew = get_travel_crew()
+            if crew and crew.available:
+                print("🤖 Running full CrewAI analysis...")
+                crew_result = crew.analyze_itineraries(
+                    itineraries=[{
+                        "name": tour_name or "Primary",
+                        "content": str(request.itinerary_data)
+                    }],
+                    analysis_focus="competitive"
+                )
+                # Extract any web packages from crew result
+                if crew_result.get("success"):
+                    # The crew might return insights that we can use
+                    queries_used.append("CrewAI multi-agent analysis")
+        
+        else:
+            # Fallback to basic search
+            if web_agent and web_agent.available:
+                query = f"{main_destination} tour package"
+                queries_used.append(query)
+                result = web_agent.search(query, num_results=request.max_results)
+                
+                if result.get("success"):
+                    for item in result.get("results", []):
+                        found_packages.append({
+                            "name": item.get("title", "Found Package"),
+                            "operator": None,
+                            "destinations": destinations,
+                            "duration": duration,
+                            "price_range": None,
+                            "currency": None,
+                            "inclusions": [],
+                            "exclusions": [],
+                            "highlights": [item.get("text", "")[:300] if item.get("text") else ""],
+                            "source_url": item.get("url", ""),
+                            "confidence": "low"
+                        })
+        
+        elapsed = time.time() - start_time
+        print(f"✅ Found {len(found_packages)} packages in {elapsed:.1f}s")
+        
+        return JSONResponse(content={
+            "success": True,
+            "found_packages": found_packages[:request.max_results],
+            "search_summary": {
+                "queries_used": queries_used,
+                "total_found": len(found_packages),
+                "timestamp": datetime.now().isoformat() if 'datetime' in dir() else None,
+                "mode": request.mode
+            },
+            "elapsed_seconds": elapsed
+        })
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Web research failed: {e}")
+        traceback.print_exc()
+        return JSONResponse(content={
+            "success": False,
+            "error": str(e),
+            "found_packages": []
+        })
+
+
+# ==========================================
+# MARKET INTELLIGENCE PIPELINE
+# ==========================================
+# Flow: Extract → Vectorize → Analyze Themes → Web Search → Aggregate → Report
+
+class MarketIntelligenceRequest(BaseModel):
+    """Request for comprehensive market intelligence analysis"""
+    documents: List[dict]  # [{"name": "...", "text": "..."}]
+    user_id: str = "default"
+    include_web_research: bool = True
+    max_web_results: int = 5  # Reduced default for speed
+    generate_report: bool = True
+    fast_mode: bool = True  # Use fast mode by default for speed
+
+class MarketIntelligenceResponse(BaseModel):
+    """Response from market intelligence pipeline"""
+    success: bool
+    pipeline_steps: dict
+    dominant_themes: dict
+    web_research: dict
+    knowledge_graph_update: dict
+    final_report: str
+    elapsed_seconds: float
+
+@app.post("/agents/market-intelligence")
+async def market_intelligence_pipeline(request: MarketIntelligenceRequest):
+    """
+    Comprehensive Market Intelligence Pipeline
+    
+    This endpoint orchestrates the full RAG-based analysis flow:
+    
+    1. EXTRACT: Parse and clean document text
+    2. VECTORIZE: Store documents in vector DB (via frontend's ArangoDB)
+    3. ANALYZE: Identify dominant cities, themes, and product patterns
+    4. WEB SEARCH: Find competitor products for the dominant themes
+    5. AGGREGATE: Combine findings into knowledge graph
+    6. REPORT: Generate comprehensive market intelligence report
+    
+    Args:
+        documents: List of documents with name and text
+        user_id: User identifier for personalization
+        include_web_research: Whether to search web for competitors
+        max_web_results: Maximum web search results
+        generate_report: Whether to generate final report
+    
+    Returns:
+        Complete market intelligence analysis with report
+    """
+    import time
+    import json
+    from collections import Counter
+    
+    start_time = time.time()
+    
+    pipeline_steps = {
+        "extract": {"status": "pending", "details": {}},
+        "analyze_themes": {"status": "pending", "details": {}},
+        "web_research": {"status": "pending", "details": {}},
+        "aggregate": {"status": "pending", "details": {}},
+        "report": {"status": "pending", "details": {}}
+    }
+    
+    print(f"\n{'='*60}")
+    print(f"🧠 MARKET INTELLIGENCE PIPELINE")
+    print(f"📄 Documents: {len(request.documents)}")
+    print(f"{'='*60}\n")
+    
+    # ============================================
+    # STEP 1: EXTRACT - Validate and clean documents
+    # ============================================
+    print("📝 Step 1: Extract & Validate Documents...")
+    
+    valid_documents = []
+    total_chars = 0
+    
+    for doc in request.documents:
+        text = doc.get("text", "")
+        name = doc.get("name", "Unknown")
+        
+        if text and len(text.strip()) > 50:
+            cleaned_text = clean_text(text)
+            valid_documents.append({
+                "name": name,
+                "text": cleaned_text,
+                "char_count": len(cleaned_text)
+            })
+            total_chars += len(cleaned_text)
+    
+    pipeline_steps["extract"] = {
+        "status": "completed",
+        "details": {
+            "input_documents": len(request.documents),
+            "valid_documents": len(valid_documents),
+            "total_characters": total_chars
+        }
+    }
+    print(f"   ✅ Extracted {len(valid_documents)} valid documents ({total_chars:,} chars)")
+    
+    if not valid_documents:
+        return JSONResponse(content={
+            "success": False,
+            "error": "No valid documents to analyze",
+            "pipeline_steps": pipeline_steps,
+            "dominant_themes": {},
+            "web_research": {},
+            "knowledge_graph_update": {},
+            "final_report": "",
+            "elapsed_seconds": time.time() - start_time
+        })
+    
+    # ============================================
+    # STEP 2: ANALYZE - Extract themes, cities, and patterns
+    # ============================================
+    print("\n🔍 Step 2: Analyze Themes & Patterns...")
+    
+    # Use OpenAI to extract structured information
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    
+    dominant_themes = {
+        "destinations": Counter(),
+        "themes": Counter(),
+        "duration_patterns": Counter(),
+        "price_ranges": Counter(),
+        "activities": Counter()
+    }
+    
+    all_extracted_data = []
+    
+    # OPTIMIZATION: Limit documents analyzed for speed
+    max_docs_to_analyze = 10 if request.fast_mode else 50
+    docs_to_analyze = valid_documents[:max_docs_to_analyze]
+    
+    if len(valid_documents) > max_docs_to_analyze:
+        print(f"   ⚡ Fast mode: Analyzing {max_docs_to_analyze} of {len(valid_documents)} documents")
+    
+    if openai_api_key:
+        import httpx
+        import asyncio
+        
+        # OPTIMIZATION: Parallel document analysis
+        async def analyze_single_doc(doc: dict, client: httpx.AsyncClient) -> dict:
+            """Analyze a single document - for parallel processing"""
+            # Use shorter text for faster processing
+            text_limit = 2000 if request.fast_mode else 4000
+            extraction_prompt = f"""Analyze this travel itinerary and extract JSON:
+Document: {doc['name']}
+Content: {doc['text'][:text_limit]}
+
+Return JSON: {{"destinations": ["cities"], "themes": ["beach/adventure/cultural/luxury/budget/family/honeymoon"], "duration": "X days Y nights", "price_range": "price or null", "activities": ["key activities"], "target_audience": "who"}}"""
+
+            try:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openai_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [{"role": "user", "content": extraction_prompt}],
+                        "temperature": 0,
+                        "response_format": {"type": "json_object"}
+                    }
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    extracted = json.loads(result["choices"][0]["message"]["content"])
+                    extracted["document_name"] = doc["name"]
+                    return extracted
+            except Exception as e:
+                print(f"   ⚠️ Failed to analyze {doc['name']}: {e}")
+            return None
+        
+        # Run parallel analysis
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            tasks = [analyze_single_doc(doc, client) for doc in docs_to_analyze]
+            results = await asyncio.gather(*tasks)
+            
+            for extracted in results:
+                if extracted:
+                    all_extracted_data.append(extracted)
+                    # Aggregate themes
+                    for dest in extracted.get("destinations", []):
+                        dominant_themes["destinations"][dest.strip()] += 1
+                    for theme in extracted.get("themes", []):
+                        dominant_themes["themes"][theme.strip().lower()] += 1
+                    if extracted.get("duration"):
+                        dominant_themes["duration_patterns"][extracted["duration"]] += 1
+                    for activity in extracted.get("activities", []):
+                        dominant_themes["activities"][activity.strip()] += 1
+        
+        print(f"   ✅ Analyzed {len(all_extracted_data)} documents in parallel")
+    
+    # Get top themes
+    top_destinations = dominant_themes["destinations"].most_common(5)
+    top_themes = dominant_themes["themes"].most_common(5)
+    top_activities = dominant_themes["activities"].most_common(10)
+    
+    # Determine the dominant destination and theme
+    main_destination = top_destinations[0][0] if top_destinations else "Unknown"
+    main_theme = top_themes[0][0] if top_themes else "general"
+    
+    pipeline_steps["analyze_themes"] = {
+        "status": "completed",
+        "details": {
+            "documents_analyzed": len(all_extracted_data),
+            "main_destination": main_destination,
+            "main_theme": main_theme,
+            "top_destinations": dict(top_destinations),
+            "top_themes": dict(top_themes)
+        }
+    }
+    
+    print(f"   ✅ Main Destination: {main_destination}")
+    print(f"   ✅ Main Theme: {main_theme}")
+    print(f"   ✅ Top destinations: {[d[0] for d in top_destinations[:3]]}")
+    
+    # ============================================
+    # STEP 3: WEB SEARCH - Find competitor products
+    # ============================================
+    web_research_results = {
+        "queries_executed": [],
+        "packages_found": [],
+        "prices_found": [],
+        "competitors_found": []
+    }
+    
+    if request.include_web_research:
+        print(f"\n🌐 Step 3: Web Research for '{main_destination}' {main_theme} tours...")
+        
+        web_agent = get_web_search_agent()
+        
+        if web_agent and web_agent.available:
+            # Build targeted search queries based on dominant themes
+            search_queries = [
+                f"{main_destination} {main_theme} tour package 2025",
+                f"{main_destination} travel itinerary price comparison",
+                f"best {main_destination} tour operators reviews"
+            ]
+            
+            if len(top_destinations) > 1:
+                second_dest = top_destinations[1][0]
+                search_queries.append(f"{main_destination} {second_dest} multi-city tour")
+            
+            for query in search_queries[:3]:  # Limit to 3 queries
+                try:
+                    print(f"   🔍 Searching: {query[:50]}...")
+                    result = web_agent.search(query, num_results=request.max_web_results // 3)
+                    
+                    if result.get("success"):
+                        web_research_results["queries_executed"].append(query)
+                        
+                        for item in result.get("results", []):
+                            package_info = {
+                                "title": item.get("title", ""),
+                                "url": item.get("url", ""),
+                                "snippet": item.get("text", "")[:500] if item.get("text") else "",
+                                "source_query": query
+                            }
+                            
+                            # Extract price if mentioned
+                            text = item.get("text", "")
+                            price_patterns = [
+                                r'(\d{1,3}(?:,\d{3})*)\s*(?:บาท|THB)',
+                                r'\$\s*(\d{1,3}(?:,\d{3})*)',
+                                r'(\d{1,3}(?:,\d{3})*)\s*USD'
+                            ]
+                            for pattern in price_patterns:
+                                match = re.search(pattern, text, re.IGNORECASE)
+                                if match:
+                                    package_info["price_found"] = match.group(0)
+                                    web_research_results["prices_found"].append({
+                                        "price": match.group(0),
+                                        "source": item.get("url", "")
+                                    })
+                                    break
+                            
+                            web_research_results["packages_found"].append(package_info)
+                            
+                except Exception as e:
+                    print(f"   ⚠️ Search failed: {e}")
+            
+            print(f"   ✅ Found {len(web_research_results['packages_found'])} packages from web")
+        else:
+            print("   ⚠️ Web search agent not available")
+    
+    pipeline_steps["web_research"] = {
+        "status": "completed" if web_research_results["packages_found"] else "skipped",
+        "details": {
+            "queries_executed": len(web_research_results["queries_executed"]),
+            "packages_found": len(web_research_results["packages_found"]),
+            "prices_found": len(web_research_results["prices_found"])
+        }
+    }
+    
+    # ============================================
+    # STEP 4: AGGREGATE - Combine into knowledge structure
+    # ============================================
+    print("\n📊 Step 4: Aggregate Knowledge...")
+    
+    knowledge_graph_update = {
+        "entities_created": [],
+        "relationships_created": [],
+        "vectors_stored": 0
+    }
+    
+    # Create entity structure for the knowledge graph
+    # (This will be sent to frontend to store in ArangoDB)
+    
+    # Main destination entity
+    destination_entity = {
+        "type": "destination",
+        "name": main_destination,
+        "properties": {
+            "total_products": len(valid_documents),
+            "themes": [t[0] for t in top_themes[:5]],
+            "activities": [a[0] for a in top_activities[:10]],
+            "web_packages_found": len(web_research_results["packages_found"])
+        }
+    }
+    knowledge_graph_update["entities_created"].append(destination_entity)
+    
+    # Product entities from documents
+    for data in all_extracted_data:
+        product_entity = {
+            "type": "product",
+            "name": data.get("document_name", "Unknown"),
+            "properties": {
+                "destinations": data.get("destinations", []),
+                "themes": data.get("themes", []),
+                "duration": data.get("duration"),
+                "target_audience": data.get("target_audience")
+            }
+        }
+        knowledge_graph_update["entities_created"].append(product_entity)
+        
+        # Create relationships
+        for dest in data.get("destinations", []):
+            knowledge_graph_update["relationships_created"].append({
+                "from": data.get("document_name"),
+                "to": dest,
+                "type": "visits"
+            })
+    
+    # Web competitor entities
+    for pkg in web_research_results["packages_found"][:5]:
+        competitor_entity = {
+            "type": "competitor_product",
+            "name": pkg.get("title", "Unknown"),
+            "properties": {
+                "url": pkg.get("url"),
+                "price": pkg.get("price_found"),
+                "snippet": pkg.get("snippet", "")[:200]
+            }
+        }
+        knowledge_graph_update["entities_created"].append(competitor_entity)
+    
+    pipeline_steps["aggregate"] = {
+        "status": "completed",
+        "details": {
+            "entities_created": len(knowledge_graph_update["entities_created"]),
+            "relationships_created": len(knowledge_graph_update["relationships_created"])
+        }
+    }
+    
+    print(f"   ✅ Created {len(knowledge_graph_update['entities_created'])} entities")
+    print(f"   ✅ Created {len(knowledge_graph_update['relationships_created'])} relationships")
+    
+    # ============================================
+    # STEP 5: REPORT - Generate comprehensive report
+    # ============================================
+    final_report = ""
+    
+    if request.generate_report and openai_api_key:
+        print("\n📝 Step 5: Generate Market Intelligence Report...")
+        
+        # Prepare context for report generation
+        report_context = f"""
+## Market Intelligence Analysis Summary
+
+### Documents Analyzed
+- Total documents: {len(valid_documents)}
+- Main destination: {main_destination}
+- Main theme: {main_theme}
+
+### Destination Distribution
+{json.dumps(dict(top_destinations), indent=2)}
+
+### Theme Distribution
+{json.dumps(dict(top_themes), indent=2)}
+
+### Popular Activities
+{json.dumps(dict(top_activities[:10]), indent=2)}
+
+### Web Research Findings
+- Competitor packages found: {len(web_research_results['packages_found'])}
+- Price points discovered: {len(web_research_results['prices_found'])}
+
+### Sample Competitor Products:
+{json.dumps(web_research_results['packages_found'][:5], indent=2, default=str)}
+
+### Price Data Found:
+{json.dumps(web_research_results['prices_found'][:10], indent=2, default=str)}
+"""
+
+        report_prompt = f"""Based on this market intelligence data, generate a comprehensive strategic report for a travel business.
+
+{report_context}
+
+Generate a professional market intelligence report with these sections:
+
+1. **Executive Summary** - Key findings in 3-4 bullet points
+2. **Market Overview** - Analysis of the {main_destination} {main_theme} market
+3. **Product Portfolio Analysis** - Insights from the analyzed documents
+4. **Competitive Landscape** - What competitors are offering based on web research
+5. **Pricing Intelligence** - Price trends and positioning opportunities
+6. **Strategic Recommendations** - 3-5 actionable recommendations
+7. **Opportunities & Threats** - SWOT-style analysis
+
+Make it actionable and data-driven. Use specific numbers from the data provided."""
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openai_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [{"role": "user", "content": report_prompt}],
+                        "temperature": 0.7,
+                        "max_tokens": 2000
+                    }
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    final_report = result["choices"][0]["message"]["content"]
+                    print(f"   ✅ Generated report ({len(final_report)} chars)")
+                else:
+                    print(f"   ⚠️ Report generation failed: {response.status_code}")
+                    
+        except Exception as e:
+            print(f"   ⚠️ Report generation error: {e}")
+    
+    pipeline_steps["report"] = {
+        "status": "completed" if final_report else "skipped",
+        "details": {
+            "report_length": len(final_report),
+            "sections_generated": final_report.count("**") // 2 if final_report else 0
+        }
+    }
+    
+    # ============================================
+    # COMPLETE - Return results
+    # ============================================
+    elapsed = time.time() - start_time
+    
+    print(f"\n{'='*60}")
+    print(f"✅ PIPELINE COMPLETE in {elapsed:.1f}s")
+    print(f"{'='*60}\n")
+    
+    # Store in memory for future reference
+    memory_agent = get_memory_agent()
+    if memory_agent:
+        try:
+            memory_agent.add_memory(
+                content=f"Market intelligence analysis: {main_destination} {main_theme} tours. "
+                        f"Analyzed {len(valid_documents)} documents, found {len(web_research_results['packages_found'])} competitor packages.",
+                user_id=request.user_id,
+                memory_type="analysis"
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to store in memory: {e}")
+    
+    return JSONResponse(content={
+        "success": True,
+        "pipeline_steps": pipeline_steps,
+        "dominant_themes": {
+            "main_destination": main_destination,
+            "main_theme": main_theme,
+            "top_destinations": dict(top_destinations),
+            "top_themes": dict(top_themes),
+            "top_activities": dict(top_activities[:10]),
+            "extracted_data": all_extracted_data
+        },
+        "web_research": web_research_results,
+        "knowledge_graph_update": knowledge_graph_update,
+        "final_report": final_report,
+        "elapsed_seconds": elapsed
+    })
+
+
+# ==========================================
+# AGENT SKILLS ENDPOINTS
+# ==========================================
+# Based on: https://github.com/Prat011/awesome-llm-skills
+
+try:
+    from agents.skills import AGENT_SKILLS, get_skills_for_task, SkillExecutor
+    SKILLS_AVAILABLE = True
+except ImportError:
+    SKILLS_AVAILABLE = False
+    print("⚠️ Agent Skills system not available")
+
+@app.get("/agents/skills")
+async def list_skills():
+    """List all available agent skills"""
+    if not SKILLS_AVAILABLE:
+        return {"skills": [], "available": False}
+    
+    skills_list = [
+        {
+            "id": skill.id,
+            "name": skill.name,
+            "description": skill.description,
+            "category": skill.category.value,
+            "triggers": skill.triggers,
+            "output_format": skill.output_format
+        }
+        for skill in AGENT_SKILLS.values()
+    ]
+    
+    return {"skills": skills_list, "available": True, "count": len(skills_list)}
+
+class SkillExecutionRequest(BaseModel):
+    """Request for skill-based task execution"""
+    task: str
+    skill_ids: List[str] = None  # Optional - auto-select if not provided
+    context: str = ""
+
+@app.post("/agents/skills/execute")
+async def execute_with_skills(request: SkillExecutionRequest):
+    """Execute a task using equipped skills"""
+    if not SKILLS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Skills system not available")
+    
+    try:
+        executor = SkillExecutor()
+        result = await executor.execute_with_skills(
+            task=request.task,
+            skill_ids=request.skill_ids,
+            context=request.context
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/agents/skills/match")
+async def match_skills_to_task(task: str):
+    """Find which skills best match a task"""
+    if not SKILLS_AVAILABLE:
+        return {"matches": [], "available": False}
+    
+    matched = get_skills_for_task(task, threshold=0.1)
+    return {
+        "matches": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "match_score": s.matches_task(task),
+                "description": s.description
+            }
+            for s in matched[:5]
+        ]
+    }
+
+
+# ==========================================
+# WIDE RESEARCH ENDPOINTS
+# ==========================================
+# Parallel multi-agent processing for large-scale tasks
+
+try:
+    from agents.wide_research import WideResearch, research_companies, analyze_products
+    WIDE_RESEARCH_AVAILABLE = True
+except ImportError:
+    WIDE_RESEARCH_AVAILABLE = False
+    print("⚠️ Wide Research system not available")
+
+class WideResearchRequest(BaseModel):
+    """Request for Wide Research parallel processing"""
+    items: List[dict]  # Items to process
+    instruction: str   # What to do with each item
+    system_prompt: str = ""  # Optional context for all agents
+    synthesis_prompt: str = None  # How to combine results
+    max_concurrent: int = 10  # Max parallel agents
+
+@app.post("/agents/wide-research")
+async def execute_wide_research(request: WideResearchRequest):
+    """
+    Execute Wide Research - Parallel processing for large-scale tasks.
+    
+    Each item is processed by an independent agent with its own context window.
+    Item #100 receives the same quality analysis as item #1.
+    
+    Use cases:
+    - Research 100+ companies
+    - Analyze 50+ products
+    - Compare 200+ tour packages
+    - Generate content for 30+ topics
+    """
+    if not WIDE_RESEARCH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Wide Research not available")
+    
+    try:
+        wr = WideResearch(max_concurrent=request.max_concurrent)
+        result = await wr.execute(
+            items=request.items,
+            instruction=request.instruction,
+            system_prompt=request.system_prompt,
+            synthesis_prompt=request.synthesis_prompt
+        )
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+class WideProductResearchRequest(BaseModel):
+    """Request for wide product/tour research"""
+    destinations: List[str]  # Destinations to research
+    product_type: str = "tour packages"  # What to search for
+    max_results_per_destination: int = 5
+    max_concurrent: int = 5
+
+@app.post("/agents/wide-research/products")
+async def wide_product_research(request: WideProductResearchRequest):
+    """
+    Research products/tours across multiple destinations in parallel.
+    
+    Example: Research tour packages for 20 destinations simultaneously.
+    Each destination gets thorough, independent research.
+    """
+    if not WIDE_RESEARCH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Wide Research not available")
+    
+    try:
+        # Get web search agent
+        web_agent = get_web_search_agent()
+        
+        async def research_destination(dest: str) -> dict:
+            """Research a single destination"""
+            query = f"{dest} {request.product_type} 2025"
+            results = {"destination": dest, "products": [], "error": None}
+            
+            if web_agent and web_agent.available:
+                search_result = web_agent.search(query, num_results=request.max_results_per_destination)
+                if search_result.get("success"):
+                    for item in search_result.get("results", []):
+                        results["products"].append({
+                            "title": item.get("title"),
+                            "url": item.get("url"),
+                            "snippet": item.get("text", "")[:300],
+                            "source": "web_search"
+                        })
+            
+            return results
+        
+        # Process all destinations in parallel
+        import asyncio
+        tasks = [research_destination(dest) for dest in request.destinations]
+        all_results = await asyncio.gather(*tasks)
+        
+        # Aggregate results
+        total_products = sum(len(r["products"]) for r in all_results)
+        
+        return {
+            "success": True,
+            "total_destinations": len(request.destinations),
+            "total_products_found": total_products,
+            "results": all_results,
+            "product_type": request.product_type
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# COMBINED: Skills + Wide Research for Travel
+# ==========================================
+
+class TravelWideResearchRequest(BaseModel):
+    """Combined skills + wide research for travel analysis"""
+    documents: List[dict]  # Uploaded documents
+    research_type: str = "competitive"  # competitive, market, trend
+    include_web_research: bool = True
+    max_concurrent: int = 5
+
+@app.post("/agents/travel-wide-research")
+async def travel_wide_research(request: TravelWideResearchRequest):
+    """
+    Combined Travel Wide Research:
+    1. Extract themes from documents using skills
+    2. Wide Research competitor products in parallel
+    3. Synthesize comprehensive market report
+    """
+    import time
+    start_time = time.time()
+    
+    results = {
+        "document_analysis": [],
+        "web_research": [],
+        "synthesis": "",
+        "success": True
+    }
+    
+    try:
+        # Step 1: Analyze each document in parallel (if Wide Research available)
+        if WIDE_RESEARCH_AVAILABLE and request.documents:
+            wr = WideResearch(max_concurrent=request.max_concurrent)
+            
+            doc_analysis = await wr.execute(
+                items=request.documents,
+                instruction="""Analyze this travel document and extract:
+- Destinations mentioned
+- Duration (days/nights)
+- Price range
+- Key activities/highlights
+- Target audience
+- Unique selling points
+
+Return as JSON format.""",
+                synthesis_prompt="""Aggregate all document analyses into:
+1. Top destinations by frequency
+2. Common price ranges
+3. Popular activities
+4. Market segments identified"""
+            )
+            
+            results["document_analysis"] = doc_analysis.get("results", [])
+            results["document_synthesis"] = doc_analysis.get("synthesis", "")
+        
+        # Step 2: Extract top destinations for web research
+        destinations_found = set()
+        for doc_result in results.get("document_analysis", []):
+            if doc_result.get("result"):
+                # Parse JSON from result
+                try:
+                    import json
+                    parsed = json.loads(doc_result["result"])
+                    if isinstance(parsed.get("destinations"), list):
+                        destinations_found.update(parsed["destinations"])
+                except:
+                    # Extract destinations using simple regex
+                    import re
+                    found = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', doc_result["result"])
+                    destinations_found.update(found[:3])
+        
+        # Step 3: Wide web research for competitor products
+        if request.include_web_research and destinations_found:
+            destinations_list = list(destinations_found)[:10]  # Limit to top 10
+            
+            web_items = [
+                {"destination": dest, "query": f"{dest} tour packages 2025 price"}
+                for dest in destinations_list
+            ]
+            
+            if WIDE_RESEARCH_AVAILABLE:
+                web_research = await wr.execute(
+                    items=web_items,
+                    instruction="""For this destination, search and find:
+- Top 5 tour packages available
+- Price ranges
+- Popular tour operators
+- Best time to visit
+- Trending activities
+
+Be specific and factual.""",
+                    synthesis_prompt="""Create a competitive market analysis:
+1. Price comparison table by destination
+2. Top tour operators identified
+3. Market gaps and opportunities
+4. Recommended positioning strategy"""
+                )
+                
+                results["web_research"] = web_research.get("results", [])
+                results["market_synthesis"] = web_research.get("synthesis", "")
+        
+        results["elapsed_seconds"] = time.time() - start_time
+        return results
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        results["success"] = False
+        results["error"] = str(e)
+        results["elapsed_seconds"] = time.time() - start_time
+        return results
+
+
+# ==========================================
+# TRANSLATION ENDPOINT
+# ==========================================
+
+class TranslationRequest(BaseModel):
+    """Request for text translation"""
+    text: str
+    target_language: str = "Thai"  # Thai or English
+
+@app.post("/translate")
+async def translate_text(request: TranslationRequest):
+    """
+    Translate text between English and Thai using AI.
+    """
+    import httpx
+    
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise HTTPException(status_code=503, detail="Translation service not available")
+    
+    # Detect source language
+    thai_chars = len(re.findall(r'[\u0E00-\u0E7F]', request.text))
+    latin_chars = len(re.findall(r'[a-zA-Z]', request.text))
+    source_language = "Thai" if thai_chars > latin_chars else "English"
+    
+    # Skip if already in target language
+    if source_language == request.target_language:
+        return {
+            "translated_text": request.text,
+            "source_language": source_language,
+            "target_language": request.target_language
+        }
+    
+    prompt = f"""Translate the following text to {request.target_language}.
+Preserve all markdown formatting, numbers, technical terms, and structure.
+Only translate - do not add or remove any content.
+
+Text to translate:
+{request.text}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                translated = result["choices"][0]["message"]["content"]
+                return {
+                    "translated_text": translated,
+                    "source_language": source_language,
+                    "target_language": request.target_language
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Translation API error")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# LANGGRAPH ORCHESTRATOR ENDPOINT
+# ==========================================
+
+try:
+    from agents.langgraph_orchestrator import LangGraphOrchestrator, run_langgraph_analysis
+    LANGGRAPH_AVAILABLE = True
+except ImportError as e:
+    LANGGRAPH_AVAILABLE = False
+    print(f"⚠️ LangGraph orchestrator not available: {e}")
+
+class LangGraphRequest(BaseModel):
+    """Request for LangGraph analysis"""
+    documents: List[dict]
+    language: str = "English"
+    skip_web_research: bool = False
+
+@app.post("/agents/langgraph/analyze")
+async def langgraph_analyze(request: LangGraphRequest):
+    """
+    Run analysis using LangGraph orchestrator.
+    
+    Provides better state management and agent coordination than CrewAI.
+    Graph: Extractor → Analyzer → Web Researcher → Synthesizer → Translator
+    """
+    if not LANGGRAPH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="LangGraph not available")
+    
+    try:
+        orchestrator = LangGraphOrchestrator()
+        result = await orchestrator.run(
+            documents=request.documents,
+            language=request.language,
+            skip_web_research=request.skip_web_research
+        )
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

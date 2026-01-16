@@ -123,9 +123,9 @@ export async function analyzeWithCrewAI(
         });
         
         // Create AbortController for timeout
-        // Reduced timeout to 3 minutes - if backend doesn't respond by then, it's likely stuck
+        // 10 minute timeout for CrewAI analysis (multi-agent processing can take time)
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minute timeout (was 10 minutes)
+        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
         
         try {
             const response = await fetch(`${BACKEND_URL}/agents/crew/analyze`, {
@@ -156,10 +156,10 @@ export async function analyzeWithCrewAI(
             clearTimeout(timeoutId);
             
             if (fetchError.name === 'AbortError') {
-                console.error('❌ CrewAI analysis timed out after 3 minutes');
+                console.error('❌ CrewAI analysis timed out after 10 minutes');
                 return {
                     success: false,
-                    error: 'Analysis timed out after 3 minutes. The CrewAI backend may not be responding. Please disable agentic analysis (uncheck 🤖 Crew) and try again with standard AI analysis.'
+                    error: 'Analysis timed out after 10 minutes. The CrewAI backend may not be responding. Please disable agentic analysis (uncheck 🤖 Crew) and try again with standard AI analysis.'
                 };
             }
             

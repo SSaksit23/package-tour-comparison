@@ -169,7 +169,7 @@ const DataComparisonTable: React.FC<DataComparisonTableProps> = ({ competitors }
     
     if (analyzedCompetitors.length === 0) {
         return (
-            <div className="text-center text-gray-500 py-8">
+            <div className="text-center text-gray-500 py-8 font-montserrat">
                 No analyzed itineraries to compare
             </div>
         );
@@ -177,58 +177,74 @@ const DataComparisonTable: React.FC<DataComparisonTableProps> = ({ competitors }
     
     const { headers, rows } = buildComparisonData(analyzedCompetitors);
     
+    // Truncate product names for cleaner display
+    const truncateName = (name: string, maxLen: number = 12) => {
+        if (name.length <= maxLen) return name;
+        return name.substring(0, maxLen) + '...';
+    };
+    
     return (
-        <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm bg-white">
-            <table className="w-full min-w-[600px] border-collapse">
-                <thead>
-                    <tr className="bg-gradient-to-r from-indigo-50 to-purple-50">
-                        {headers.map((header, i) => (
-                            <th 
-                                key={i} 
-                                className="p-4 border-b-2 border-indigo-100 text-left font-bold text-indigo-900 whitespace-nowrap"
-                                style={{ width: i === 0 ? '15%' : 'auto', minWidth: i === 0 ? '100px' : '120px' }}
-                            >
-                                <div className="flex items-center gap-2">
-                                    {i === 0 && <span className="text-indigo-500">📊</span>}
-                                    <span className="truncate" title={header}>{header}</span>
-                                </div>
-                            </th>
-                        ))}
-                    </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                    {rows.map((row, rowIdx) => (
-                        <tr key={rowIdx} className="hover:bg-gray-50/50 transition-colors">
-                            <td className="p-4 font-medium text-gray-800 bg-gray-50/50 whitespace-nowrap">
-                                {row.label}
-                            </td>
-                            {row.values.map((value, colIdx) => {
-                                const colorClass = value !== 'N/A' ? getValueColor(value, row.type as any) : '';
-                                const isNA = value === 'N/A' || value === '0';
-                                return (
-                                    <td key={colIdx} className={`p-4 ${isNA ? 'text-gray-400' : 'text-gray-700'}`}>
-                                        {colorClass ? (
-                                            <span className={`inline-block px-2 py-1 rounded-lg text-sm font-medium ${colorClass}`}>
-                                                {value}
-                                            </span>
-                                        ) : (
-                                            <span>{value}</span>
-                                        )}
-                                    </td>
-                                );
-                            })}
+        <div className="rounded-xl border border-gray-200 shadow-sm bg-white font-montserrat overflow-hidden">
+            {/* Scrollable table container */}
+            <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                    <thead>
+                        <tr className="bg-gradient-to-r from-blue-50 to-indigo-50">
+                            {headers.map((header, i) => (
+                                <th 
+                                    key={i} 
+                                    className={`px-3 py-3 border-b border-blue-100 text-left font-semibold text-gray-800 ${
+                                        i === 0 ? 'sticky left-0 bg-blue-50 z-10 min-w-[90px]' : 'min-w-[100px]'
+                                    }`}
+                                >
+                                    {i === 0 ? (
+                                        <span className="flex items-center gap-1.5">
+                                            <span className="text-blue-500">⚖️</span>
+                                            <span>{header}</span>
+                                        </span>
+                                    ) : (
+                                        <span className="block truncate max-w-[120px]" title={header}>
+                                            {truncateName(header, 15)}
+                                        </span>
+                                    )}
+                                </th>
+                            ))}
                         </tr>
-                    ))}
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                        {rows.map((row, rowIdx) => (
+                            <tr key={rowIdx} className="hover:bg-gray-50/50 transition-colors">
+                                <td className="px-3 py-2.5 font-medium text-gray-700 bg-gray-50/80 sticky left-0 z-10 whitespace-nowrap text-xs">
+                                    {row.label}
+                                </td>
+                                {row.values.map((value, colIdx) => {
+                                    const colorClass = value !== 'N/A' ? getValueColor(value, row.type as any) : '';
+                                    const isNA = value === 'N/A' || value === '0';
+                                    return (
+                                        <td key={colIdx} className={`px-3 py-2.5 text-center ${isNA ? 'text-gray-400' : 'text-gray-700'}`}>
+                                            {colorClass ? (
+                                                <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${colorClass}`}>
+                                                    {value}
+                                                </span>
+                                            ) : (
+                                                <span className="text-sm">{value}</span>
+                                            )}
+                                        </td>
+                                    );
+                                })}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
             
-            {/* Data source indicator */}
-            <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 text-xs text-gray-500 flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                    <span className="w-2 h-2 bg-green-400 rounded-full"></span>
-                    Data from stored analysis (reliable)
+            {/* Footer */}
+            <div className="px-3 py-2 bg-gray-50 border-t border-gray-100 text-xs text-gray-500 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
+                    Stored data
                 </span>
-                <span>{analyzedCompetitors.length} products compared</span>
+                <span>{analyzedCompetitors.length} products</span>
             </div>
         </div>
     );

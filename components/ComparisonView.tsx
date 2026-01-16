@@ -18,7 +18,7 @@ const getFontClass = (text: string): string => {
         }
         return 'font-mixed';
     }
-    return 'font-slab';
+    return 'font-montserrat';
 };
 
 // Enhanced section rendering for AI insights
@@ -143,8 +143,8 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ comparison, competitors
                         <span className="text-xl text-white">⚖️</span>
                     </div>
                     <div>
-                        <h2 className="text-xl font-semibold text-gray-800 tracking-tight font-slab">Comparison Analysis</h2>
-                        <p className="text-sm text-gray-500 font-slab">Side-by-side itinerary comparison</p>
+                        <h2 className="text-xl font-semibold text-gray-800 tracking-tight font-montserrat">Comparison Analysis</h2>
+                        <p className="text-sm text-gray-500 font-montserrat">Side-by-side itinerary comparison</p>
                     </div>
                 </div>
                 

@@ -97,13 +97,12 @@ export interface AppState {
   isGeneratingRecs: boolean;
   analysisError: string | null;
   language: string;
-  isNeo4jConnected: boolean;
   isChromaConnected: boolean;
   isArangoConnected: boolean;
   uploadProgress: UploadProgress | null;
 }
 
-// Neo4j Knowledge Graph Types
+// Knowledge Graph Types (ArangoDB)
 export interface GraphDocument {
   id: string;
   name: string;

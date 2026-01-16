@@ -1,0 +1,15 @@
+# Agentic Web Research Module Dependencies
+# CrewAI Framework
+crewai>=0.28.0
+crewai-tools>=0.1.0
+
+# Web Search & Scraping
+google-search-results>=2.4.2
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# Environment & Utilities
+python-dotenv>=1.0.0
+
+# Note: This module is designed to work with the existing backend
+# which already has openai, mem0ai, and exa-py installed

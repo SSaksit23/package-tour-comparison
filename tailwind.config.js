@@ -74,6 +74,7 @@ export default {
         "accordion-up": "accordion-up 0.2s ease-out",
       },
       fontFamily: {
+        'montserrat': ['"Montserrat"', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
         'slab': ['"Roboto Slab"', 'Georgia', 'serif'],
         'thai': ['"Sarabun"', 'sans-serif'],
       },

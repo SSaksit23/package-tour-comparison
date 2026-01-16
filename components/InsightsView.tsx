@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { LightbulbIcon } from './icons/LightbulbIcon';
+import { LanguageIcon } from './icons/LanguageIcon';
 
 interface InsightsViewProps {
   recommendations: string | null;
@@ -24,7 +25,7 @@ const getFontClass = (text: string): string => {
         }
         return 'font-mixed';
     }
-    return 'font-slab';
+    return 'font-montserrat';
 };
 
 // Icons for different sections
@@ -423,31 +424,77 @@ const InsightsView: React.FC<InsightsViewProps> = ({ recommendations, isLoading,
 
     // Determine primary font based on content
     const fontClass = getFontClass(recommendations);
+    const [translatedText, setTranslatedText] = useState<string | null>(null);
+    const [isTranslating, setIsTranslating] = useState(false);
+    const [showTranslated, setShowTranslated] = useState(false);
+    
+    const handleTranslate = async () => {
+        if (translatedText) {
+            setShowTranslated(!showTranslated);
+            return;
+        }
+        
+        setIsTranslating(true);
+        try {
+            const isCurrentlyThai = containsThai(recommendations);
+            const targetLang = isCurrentlyThai ? 'English' : 'Thai';
+            
+            const response = await fetch(`${import.meta.env.VITE_PDF_EXTRACTOR_URL || 'http://localhost:5001'}/translate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: recommendations, target_language: targetLang })
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                setTranslatedText(data.translated_text);
+                setShowTranslated(true);
+            }
+        } catch (error) {
+            console.error('Translation failed:', error);
+        } finally {
+            setIsTranslating(false);
+        }
+    };
+    
+    const displayText = showTranslated && translatedText ? translatedText : recommendations;
+    const displayFontClass = getFontClass(displayText);
     
     return (
-        <div className={`p-6 max-w-4xl ${fontClass}`}>
+        <div className={`p-4 sm:p-6 max-w-4xl ${displayFontClass}`}>
+            {/* Translation button */}
+            <div className="flex justify-end mb-4">
+                <button
+                    onClick={handleTranslate}
+                    disabled={isTranslating}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                >
+                    <LanguageIcon className="w-4 h-4" />
+                    {isTranslating ? 'Translating...' : (showTranslated ? 'Show Original' : (containsThai(recommendations) ? 'Translate to English' : 'แปลเป็นไทย'))}
+                </button>
+            </div>
+            
             <div className="bg-white rounded-2xl">
-                {renderEnhancedMarkdown(recommendations)}
+                {renderEnhancedMarkdown(displayText)}
             </div>
             
             {/* Footer */}
-            <div className="mt-8 pt-4 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
+            <div className="mt-6 pt-4 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
                 <span className="flex items-center gap-2">
                     {ragUsed ? (
                         <>
                             <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
                             <span className="text-green-600 font-medium">RAG Enhanced</span>
-                            <span className="text-gray-400">({ragDocCount} KB docs)</span>
+                            <span className="text-gray-400">({ragDocCount} docs)</span>
                         </>
                     ) : (
                         <>
                             <span className="w-2 h-2 bg-amber-400 rounded-full" />
                             <span className="text-amber-600">Analysis Only</span>
-                            <span className="text-gray-400">(Upload docs to KB for enhanced insights)</span>
                         </>
                     )}
                 </span>
-                <span>Powered by Gemini 2.0</span>
+                <span className="font-montserrat">Powered by Gemini 2.0</span>
             </div>
         </div>
     );

@@ -71,13 +71,29 @@
   box-sizing: border-box;
 }
 
-/* Font configuration: Roboto Slab for English, Sarabun for Thai */
+/* Font configuration: Montserrat for English, Sarabun for Thai */
 body {
   margin: 0;
   padding: 0;
-  font-family: "Roboto Slab", "Sarabun", Georgia, serif;
+  font-family: "Montserrat", "Sarabun", -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+}
+
+/* Montserrat utility class */
+.font-montserrat {
+  font-family: "Montserrat", -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+/* Override prose font to use Montserrat */
+.prose, .prose * {
+  font-family: "Montserrat", "Sarabun", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+  font-family: "Montserrat", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 600;
 }
 
 /* Thai text styling - applies Sarabun font to Thai unicode range */
@@ -98,9 +114,9 @@ body {
   font-family: "Sarabun", sans-serif;
 }
 
-/* Mixed content: Use both fonts */
+/* Mixed content: Use both fonts - Montserrat for Latin, Sarabun for Thai */
 .font-mixed {
-  font-family: "Roboto Slab", "Sarabun", Georgia, serif;
+  font-family: "Montserrat", "Sarabun", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 #root {
